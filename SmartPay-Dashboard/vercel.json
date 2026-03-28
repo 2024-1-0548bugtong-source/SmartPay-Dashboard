@@ -1,6 +1,6 @@
 {
   "version": 2,
   "installCommand": "pnpm install",
-  "buildCommand": "pnpm run build",
+  "buildCommand": "pnpm install && pnpm --filter @workspace/smartpay-dashboard run build",
   "outputDirectory": "artifacts/smartpay-dashboard/dist"
 }
