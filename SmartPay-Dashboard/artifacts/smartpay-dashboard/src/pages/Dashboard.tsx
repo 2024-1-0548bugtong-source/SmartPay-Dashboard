@@ -13,6 +13,22 @@ import {
   type SmState,
 } from "@/lib/stateMachine";
 
+// Web Serial API type declarations
+declare global {
+  interface Navigator {
+    serial: {
+      requestPort(): Promise<SerialPort>;
+    };
+  }
+  
+  interface SerialPort {
+    open(options: { baudRate: number }): Promise<void>;
+    close(): Promise<void>;
+    readable: ReadableStream<Uint8Array> | null;
+    writable: WritableStream<Uint8Array> | null;
+  }
+}
+
 type ConnectionStatus = "disconnected" | "connected" | "connecting";
 
 // ── LCD Simulator ─────────────────────────────────────────────────────────
@@ -350,12 +366,14 @@ export default function Dashboard() {
     }
     try {
       setConnStatus("connecting");
-      const port = await (navigator as Navigator & { serial: { requestPort: () => Promise<SerialPort> } }).serial.requestPort();
+      const port = await navigator.serial.requestPort();
       await port.open({ baudRate: 9600 });
       portRef.current = port;
       setConnStatus("connected");
       const decoder = new TextDecoderStream();
-      port.readable?.pipeTo(decoder.writable);
+      if (port.readable) {
+        port.readable.pipeTo(decoder.writable as any);
+      }
       const reader = decoder.readable.getReader();
       readerRef.current = reader as unknown as ReadableStreamDefaultReader<Uint8Array>;
       let buf = "";

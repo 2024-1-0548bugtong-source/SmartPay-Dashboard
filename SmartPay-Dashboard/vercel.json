@@ -1,7 +1,5 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "pnpm --filter @workspace/smartpay-dashboard run build",
-  "outputDirectory": "artifacts/smartpay-dashboard/dist/public",
+  "version": 2,
   "installCommand": "pnpm install",
-  "framework": null
+  "buildCommand": "pnpm run build"
 }

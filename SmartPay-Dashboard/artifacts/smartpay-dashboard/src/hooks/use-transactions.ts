@@ -4,13 +4,14 @@ import {
   useCreateTransaction,
   useGetTransactionStats 
 } from "@workspace/api-client-react";
-import type { Transaction, CreateTransaction } from "@workspace/api-client-react/src/generated/api.schemas";
+import type { Transaction, CreateTransaction } from "@workspace/api-client-react";
 
 export function useTransactions() {
   const queryClient = useQueryClient();
   
   const query = useGetTransactions({
     query: {
+      queryKey: ["/api/transactions"],
       refetchInterval: 5000, // Poll every 5s for updates from other devices
     }
   });
@@ -56,6 +57,7 @@ export function useTransactions() {
 
   const statsQuery = useGetTransactionStats({
     query: {
+      queryKey: ["/api/transactions/stats"],
       refetchInterval: 5000,
     }
   });

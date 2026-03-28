@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from "react";
-import type { CreateTransaction } from "@workspace/api-client-react/src/generated/api.schemas";
+import type { CreateTransaction } from "@workspace/api-client-react";
 
 interface SerialState {
   isConnected: boolean;
@@ -84,9 +84,11 @@ export function useSerial(onTransactionParsed: (tx: CreateTransaction) => void) 
       setState({ isConnected: true, isConnecting: false, error: null });
 
       // Start reading loop
-      // @ts-ignore
       const textDecoder = new TextDecoderStream();
-      const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+      if (!port.readable) {
+        throw new Error("Serial port readable stream not available");
+      }
+      port.readable.pipeTo(textDecoder.writable as any);
       const reader = textDecoder.readable.getReader();
       readerRef.current = reader;
 
