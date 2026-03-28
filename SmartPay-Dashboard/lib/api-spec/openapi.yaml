@@ -1,0 +1,174 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: SmartPay Store API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: transactions
+    description: Transaction operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /transactions:
+    get:
+      operationId: getTransactions
+      tags: [transactions]
+      summary: Get all transactions
+      description: Returns all transactions stored in the database
+      responses:
+        "200":
+          description: List of transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transaction"
+    post:
+      operationId: createTransaction
+      tags: [transactions]
+      summary: Create a transaction
+      description: Persists a new transaction event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTransaction"
+      responses:
+        "201":
+          description: Created transaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+  /transactions/export:
+    get:
+      operationId: exportTransactionsCsv
+      tags: [transactions]
+      summary: Export transactions as CSV
+      description: Returns all transactions as a CSV file
+      responses:
+        "200":
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+  /transactions/stats:
+    get:
+      operationId: getTransactionStats
+      tags: [transactions]
+      summary: Get transaction statistics
+      description: Returns aggregated stats for the dashboard
+      responses:
+        "200":
+          description: Stats object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionStats"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        event:
+          type: string
+        product:
+          type: string
+          nullable: true
+        paymentStatus:
+          type: string
+          nullable: true
+        weight:
+          type: string
+          nullable: true
+        rawLine:
+          type: string
+          nullable: true
+      required:
+        - id
+        - timestamp
+        - event
+    CreateTransaction:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        event:
+          type: string
+        product:
+          type: string
+          nullable: true
+        paymentStatus:
+          type: string
+          nullable: true
+        weight:
+          type: string
+          nullable: true
+        rawLine:
+          type: string
+          nullable: true
+      required:
+        - event
+    TransactionStats:
+      type: object
+      properties:
+        todayCount:
+          type: integer
+        totalRevenue:
+          type: number
+        successRate:
+          type: number
+        hourlyData:
+          type: array
+          items:
+            $ref: "#/components/schemas/HourlyCount"
+        currentState:
+          type: string
+      required:
+        - todayCount
+        - totalRevenue
+        - successRate
+        - hourlyData
+        - currentState
+    HourlyCount:
+      type: object
+      properties:
+        hour:
+          type: string
+        count:
+          type: integer
+      required:
+        - hour
+        - count

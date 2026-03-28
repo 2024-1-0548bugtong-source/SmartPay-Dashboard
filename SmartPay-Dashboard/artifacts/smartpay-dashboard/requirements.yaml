@@ -1,0 +1,14 @@
+packages:
+  "recharts": "For the Transactions per Hour bar chart"
+  "framer-motion": "For smooth layout animations and interactions"
+  "date-fns": "For formatting timestamps beautifully"
+  "clsx": "For conditional tailwind class merging"
+  "tailwind-merge": "For merging tailwind classes safely"
+  "lucide-react": "For crisp, modern icons"
+
+images: []
+
+notes:
+  - "Using Web Serial API which requires Chrome/Edge and a secure context (or localhost)"
+  - "Transactions are synced to the backend but also kept in a local React Query cache for instant UI updates"
+  - "Assuming the backend API is mounted at the relative path /api"
