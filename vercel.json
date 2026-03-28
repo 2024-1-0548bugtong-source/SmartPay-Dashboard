@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "installCommand": "cd SmartPay-Dashboard && pnpm install",
+  "buildCommand": "cd SmartPay-Dashboard && pnpm --filter @workspace/smartpay-dashboard run build",
+  "outputDirectory": "SmartPay-Dashboard/artifacts/smartpay-dashboard/dist",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
