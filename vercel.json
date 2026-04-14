@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "installCommand": "corepack enable && cd SmartPay-Dashboard && pnpm install --no-frozen-lockfile",
+  "installCommand": "cd SmartPay-Dashboard && pnpm install --no-frozen-lockfile",
   "buildCommand": "cd SmartPay-Dashboard && pnpm --filter @workspace/smartpay-dashboard run build",
   "outputDirectory": "SmartPay-Dashboard/artifacts/smartpay-dashboard/dist",
   "rewrites": [
