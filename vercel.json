@@ -1,7 +1,7 @@
 {
   "version": 2,
-  "installCommand": "npm install -g pnpm@10.33.0 && cd SmartPay-Dashboard && pnpm install --no-frozen-lockfile",
-  "buildCommand": "cd SmartPay-Dashboard && pnpm --filter @workspace/smartpay-dashboard run build",
+  "installCommand": "cd SmartPay-Dashboard && npx pnpm@10.33.0 install --no-frozen-lockfile",
+  "buildCommand": "cd SmartPay-Dashboard && npx pnpm@10.33.0 --filter @workspace/smartpay-dashboard run build",
   "outputDirectory": "SmartPay-Dashboard/artifacts/smartpay-dashboard/dist",
   "rewrites": [
     {
