@@ -172,15 +172,15 @@ export function computeStats(rows: TransactionRow[]) {
       entryTime = null;
     }
 
-    // Only count actual coin-weigh outcomes (Verified / Insufficient) — not "Pending"
-    if (row.paymentStatus === "Verified") {
+    // Only count explicit payment outcome events for success metrics.
+    if (ev === "payment ok") {
       // Use product from this row OR the last seen product from the same session
       const productStr = row.product ?? lastKnownProduct;
       const match = productStr?.match(/PHP(\d+)/i);
       if (match) totalRevenue += parseInt(match[1], 10);
       verifiedCount++;
       lastKnownProduct = null; // consumed
-    } else if (row.paymentStatus === "Insufficient") {
+    } else if (ev === "payment incomplete") {
       insufficientCount++;
       // Don't clear lastKnownProduct — next attempt (if any) is for same product
     }
@@ -201,7 +201,18 @@ export function computeStats(rows: TransactionRow[]) {
   const latestRow = sorted[sorted.length - 1];
   if (latestRow) {
     const ev = latestRow.event.toLowerCase();
-    if (ev === "entry" || ev.includes("product removed") || ev.includes("payment") || ev.includes("customer entered") || ev.includes("pay php")) {
+    if (
+      ev === "entry" ||
+      ev.includes("product removed") ||
+      ev.includes("payment") ||
+      ev.includes("customer entered") ||
+      ev.startsWith("pay ") ||
+      ev.includes("coin detected") ||
+      ev.includes("inserted balance") ||
+      ev.includes("remaining balance") ||
+      ev.includes("dispensing product") ||
+      ev.includes("add more")
+    ) {
       currentState = "Customer Present";
     } else if (ev === "customer left" || ev === "smartpay ready") {
       currentState = "Ready";

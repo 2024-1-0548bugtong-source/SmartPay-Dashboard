@@ -195,6 +195,9 @@ export type SerialTrigger =
   | "CUSTOMER_ENTERED"
   | "PRODUCT_REMOVED"
   | "PAY_PROMPT"
+  | "INSERT_COINS"
+  | "SENSOR_RESETTING"
+  | "PLACE_ITEM"
   | "COINS_OK"
   | "COINS_FAIL"
   | "CUSTOMER_LEFT"
@@ -206,10 +209,13 @@ export type SerialTrigger =
 export function eventToTrigger(event: string): SerialTrigger {
   const ev = event.toLowerCase();
   if (ev === "smartpay ready") return "READY";
+  if (ev === "place item") return "PLACE_ITEM";
   if (ev === "entry") return "ENTRY";
   if (ev === "customer entered") return "CUSTOMER_ENTERED";
   if (ev.includes("product removed")) return "PRODUCT_REMOVED";
-  if (ev.startsWith("pay php")) return "PAY_PROMPT";
+  if (ev.startsWith("pay ")) return "PAY_PROMPT";
+  if (ev === "insert coins") return "INSERT_COINS";
+  if (ev === "sensor resetting") return "SENSOR_RESETTING";
   if (ev === "payment ok") return "COINS_OK";
   if (ev === "payment incomplete") return "COINS_FAIL";
   if (ev === "customer left") return "READY";
@@ -228,6 +234,7 @@ export function applyTrigger(
 
   switch (trigger) {
     case "READY":
+    case "PLACE_ITEM":
       transition("READY");
       return true;
     case "ENTRY":
@@ -236,10 +243,12 @@ export function applyTrigger(
       return true;
     case "PRODUCT_REMOVED":
     case "PAY_PROMPT":
+    case "INSERT_COINS":
       transition("PAY", ctx);
       return true;
     case "COINS_OK":
     case "PAYMENT_OK_EXPLICIT":
+    case "SENSOR_RESETTING":
       transition("OK", ctx);
       return true;
     case "COINS_FAIL":

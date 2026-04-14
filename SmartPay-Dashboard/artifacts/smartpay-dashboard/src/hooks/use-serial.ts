@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import type { CreateTransaction } from "@workspace/api-client-react";
+import { formatProductLabel } from "../lib/serial";
 
 interface SerialState {
   isConnected: boolean;
@@ -28,14 +29,18 @@ export function useSerial(onTransactionParsed: (tx: CreateTransaction) => void) 
 
     if (trimmed.startsWith("Entry:")) {
       event = "Entry";
-    } else if (trimmed.includes("Product Removed")) {
+    } else if (trimmed.toLowerCase().includes("product removed")) {
       event = "Product Removed";
-      // e.g., "Product Removed. Pay PHP5."
-      const match = trimmed.match(/Pay\s+(PHP\d+)/i);
+      // e.g., "Product Removed. Pay Product One (PHP5)."
+      const match = trimmed.match(/Pay\s+(.+)/i);
       if (match) {
-        product = match[1];
+        product = formatProductLabel(match[1]);
         paymentStatus = "Pending";
       }
+    } else if (/^pay\s+/i.test(trimmed)) {
+      product = formatProductLabel(trimmed.slice(4));
+      event = product ? `Pay ${product}` : "Pay";
+      paymentStatus = "Pending";
     } else if (trimmed.startsWith("Coins:")) {
       // e.g., "Coins: 5.2g - OK" or "Coins: 3.1g - INSUFFICIENT"
       const parts = trimmed.split("-").map(s => s.trim());
