@@ -7,7 +7,7 @@ import {
   exportCsv, computeStats, computePirFromTransactions,
   type TransactionRow,
 } from "@/lib/storage";
-import { parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
+import { PRODUCT_CATALOG, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
 import {
   useStateMachine, applyTrigger, eventToTrigger, SM_STATES,
   type SmState,
@@ -213,16 +213,30 @@ const DEMO_SCRIPT = [
   { line: "SmartPay Ready",               delay: 800  },
   { line: "Entry: 201",                   delay: 1500 },
   { line: "Customer Entered",             delay: 1000 },
-  { line: "Product Removed. Pay PHP5.",   delay: 2000 },
-  { line: "Pay PHP5",                     delay: 1500 },
-  { line: "Coins: 5.2g - OK",             delay: 1500 },
+  { line: `Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`, delay: 2000 },
+  { line: `Pay ${PRODUCT_CATALOG.PHP5.label}`, delay: 1500 },
+  { line: "Coin Detected: 7.3g -> PHP5 ACCEPTED", delay: 900 },
+  { line: "Inserted: PHP5",               delay: 700 },
+  { line: "Remaining: PHP0",              delay: 700 },
+  { line: "Dispensing Product...",        delay: 900 },
   { line: "Payment OK",                   delay: 4000 }, // wait for 3s auto-reset
   { line: "SmartPay Ready",               delay: 1000 },
   { line: "Entry: 202",                   delay: 1500 },
-  { line: "Product Removed. Pay PHP5.",   delay: 1500 },
-  { line: "Coins: 3.1g - INSUFFICIENT",   delay: 1500 },
+  { line: `Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`, delay: 1500 },
+  { line: `Pay ${PRODUCT_CATALOG.PHP10.label}`, delay: 1000 },
+  { line: "Coin Detected: 7.3g -> PHP5 ACCEPTED", delay: 900 },
+  { line: "Inserted: PHP5",               delay: 700 },
+  { line: "Remaining: PHP5",              delay: 700 },
   { line: "Add More Coins",              delay: 6000 }, // wait for 5s retry
-  { line: "Coins: 5.0g - OK",             delay: 1500 },
+  { line: "Coin Detected: 7.9g -> INVALID COIN", delay: 900 },
+  { line: "Inserted: PHP5",               delay: 700 },
+  { line: "Remaining: PHP5",              delay: 700 },
+  { line: "Add More Coins",              delay: 1500 },
+  { line: "Coin Detected: 8.8g -> PHP10 ACCEPTED", delay: 900 },
+  { line: "Inserted: PHP15",              delay: 700 },
+  { line: "Remaining: PHP0",              delay: 700 },
+  { line: "Dispensing Product...",        delay: 900 },
+  { line: "Payment OK",                   delay: 1200 },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -233,11 +247,36 @@ function formatTimestamp(ts: string) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function extractCoinValue(row: TransactionRow): string | null {
+  if (!row.event.toLowerCase().includes("coin detected")) return null;
+
+  const fromRaw = row.rawLine?.match(/->\s*(PHP(?:5|10))\s+accepted/i)?.[1];
+  if (fromRaw) return fromRaw.toUpperCase();
+
+  const fromDetected = row.rawLine?.match(/^detected:\s*(5|10)\s*coins?\b/i)?.[1];
+  if (fromDetected) return `PHP${fromDetected}`;
+
+  const fromProduct = row.product?.match(/PHP\s*(5|10)/i)?.[1];
+  return fromProduct ? `PHP${fromProduct}` : null;
+}
+
+function extractPhpAmount(rawLine: string | null): number | null {
+  const m = rawLine?.match(/php\s*(\d+)/i)?.[1];
+  if (!m) return null;
+  const n = Number(m);
+  return Number.isFinite(n) ? n : null;
+}
+
 function EventBadge({ event }: { event: string }) {
   const ev = event.toLowerCase();
   let cls = "px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ";
   if (ev === "entry") cls += "bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200";
   else if (ev.includes("product removed")) cls += "bg-orange-100 text-orange-800 dark:bg-orange-900/60 dark:text-orange-200";
+  else if (ev.includes("coin detected")) cls += "bg-sky-100 text-sky-800 dark:bg-sky-900/60 dark:text-sky-200";
+  else if (ev.includes("invalid coin")) cls += "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200";
+  else if (ev.includes("inserted balance")) cls += "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-200";
+  else if (ev.includes("remaining balance")) cls += "bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200";
+  else if (ev.includes("dispensing")) cls += "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200";
   else if (ev === "payment ok") cls += "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200";
   else if (ev.includes("payment incomplete") || ev.includes("add more")) cls += "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200";
   else if (ev === "customer left") cls += "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300";
@@ -265,12 +304,14 @@ export default function Dashboard() {
   const [manualLine, setManualLine] = useState("");
   const [recentPirFlash, setRecentPirFlash] = useState(false);
   const [demoRunning, setDemoRunning] = useState(false);
+  const [serialLcdState, setSerialLcdState] = useState<LcdState | null>(null);
 
   const portRef = useRef<SerialPort | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const sm = useStateMachine();
+  const effectiveLcdState = serialLcdState ?? sm.lcdState;
 
   // ── Dark mode ──
   useEffect(() => {
@@ -320,6 +361,10 @@ export default function Dashboard() {
   const handleLine = useCallback((rawLine: string) => {
     const parsed = parseSerialLine(rawLine);
     if (!parsed) return;
+
+    if (parsed.lcdState) {
+      setSerialLcdState(parsed.lcdState);
+    }
 
     sm.ping();
 
@@ -432,6 +477,11 @@ export default function Dashboard() {
 
   const stats = computeStats(transactions);
 
+  const latestInserted = transactions.find((r) => r.event === "Inserted Balance");
+  const latestRemaining = transactions.find((r) => r.event === "Remaining Balance");
+  const insertedAmount = extractPhpAmount(latestInserted?.rawLine ?? null);
+  const remainingAmount = extractPhpAmount(latestRemaining?.rawLine ?? null);
+
   const connBadge = connStatus === "connected"
     ? "bg-green-500/20 text-green-300 border border-green-500/30"
     : connStatus === "connecting"
@@ -473,6 +523,15 @@ export default function Dashboard() {
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-bold bg-yellow-500/20 text-yellow-200">
                 <span>💰</span>
                 <span>PHP {stats.totalRevenue}</span>
+              </div>
+              {/* Running balance */}
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-bold bg-indigo-500/20 text-indigo-100 border border-indigo-300/20">
+                <span>➕</span>
+                <span>Inserted: PHP {insertedAmount ?? 0}</span>
+              </div>
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-bold bg-orange-500/20 text-orange-100 border border-orange-300/20">
+                <span>⌛</span>
+                <span>Remaining: PHP {remainingAmount ?? 0}</span>
               </div>
               {/* Connection */}
               <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${connBadge}`}>
@@ -531,7 +590,7 @@ export default function Dashboard() {
                 <input type="text" value={manualLine}
                   onChange={(e) => setManualLine(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleManualAdd()}
-                  placeholder='"Entry: 124"  "Product Removed. Pay PHP5."  "Coins: 5.2g - OK"'
+                  placeholder='"Entry: 124"  "Product Removed. Pay Product One (PHP5)."  "Inserted: PHP5"  "Remaining: PHP0"  "Payment OK"'
                   className="flex-1 px-3 py-2 bg-background border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
                 <button onClick={handleManualAdd}
                   className="px-4 py-2 bg-primary text-white rounded-lg font-semibold text-sm hover:bg-blue-800">
@@ -541,9 +600,12 @@ export default function Dashboard() {
               <div className="flex flex-wrap gap-1.5 mt-3">
                 {[
                   "SmartPay Ready", "Entry: 124", "Customer Entered",
-                  "Product Removed. Pay PHP5.", "Pay PHP5",
-                  "Coins: 5.2g - OK", "Coins: 3.1g - INSUFFICIENT",
-                  "Add More Coins", "Customer Left",
+                  `Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`, `Pay ${PRODUCT_CATALOG.PHP5.label}`,
+                  `Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`, `Pay ${PRODUCT_CATALOG.PHP10.label}`,
+                  "Coin Detected: 7.3g -> PHP5 ACCEPTED", "Coin Detected: 8.8g -> PHP10 ACCEPTED",
+                  "Coin Detected: 7.9g -> INVALID COIN",
+                  "Inserted: PHP5", "Remaining: PHP5", "Remaining: PHP0",
+                  "Dispensing Product...", "Payment OK", "Add More Coins", "Customer Left",
                 ].map((s, qi) => (
                   <button key={qi} onClick={() => handleLine(s)}
                     className="px-2 py-1 bg-muted hover:bg-muted/60 border border-border rounded text-xs font-mono transition-colors">
@@ -558,7 +620,7 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 items-start">
             {/* LCD — takes 2/5 */}
             <div className="lg:col-span-2">
-              <LcdSimulator state={sm.lcdState} smState={sm.state} />
+              <LcdSimulator state={effectiveLcdState} smState={sm.state} />
             </div>
 
             {/* Right column — flow + PIR + stats */}
@@ -644,11 +706,11 @@ export default function Dashboard() {
               <h2 className="font-bold text-base">Live Transaction Log</h2>
               <span className="text-xs text-muted-foreground">{transactions.length} entries</span>
             </div>
-            <div className="overflow-x-auto max-h-[380px] overflow-y-auto">
+            <div className="overflow-x-auto max-h-95 overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10">
                   <tr className="bg-muted/80 backdrop-blur">
-                    {["Timestamp", "Event", "Product", "Payment Status", "Weight"].map((h) => (
+                    {["Timestamp", "Event", "Product", "Payment Status", "Coin Value", "Weight"].map((h) => (
                       <th key={h} className="text-left px-4 py-2 font-semibold text-muted-foreground text-xs whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -656,7 +718,7 @@ export default function Dashboard() {
                 <tbody className="divide-y divide-border">
                   {transactions.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-12 text-muted-foreground">
+                      <td colSpan={6} className="text-center py-12 text-muted-foreground">
                         <div className="text-3xl mb-2">📡</div>
                         <div>No transactions yet.</div>
                         <div className="text-xs mt-1">Connect Arduino, run the demo, or use Manual Entry.</div>
@@ -671,6 +733,13 @@ export default function Dashboard() {
                           : <span className="text-muted-foreground">—</span>}
                       </td>
                       <td className="px-4 py-2"><StatusBadge status={row.paymentStatus} /></td>
+                      <td className="px-4 py-2">
+                        {extractCoinValue(row) ? (
+                          <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800 dark:bg-sky-900/60 dark:text-sky-200">
+                            {extractCoinValue(row)}
+                          </span>
+                        ) : <span className="text-muted-foreground">—</span>}
+                      </td>
                       <td className="px-4 py-2">
                         {row.weight ? <span className="font-mono text-xs">{row.weight}</span>
                           : <span className="text-muted-foreground">—</span>}
@@ -744,10 +813,18 @@ function ArduinoGuide() {
               ["SmartPay Ready",              "→ blue LCD, reset state"],
               ["Entry: 124",                  "→ yellow LCD, PIR +1"],
               ["Customer Entered",            "→ yellow LCD"],
-              ["Product Removed. Pay PHP5.",  "→ orange LCD, log entry"],
-              ["Pay PHP5",                    "→ orange LCD, awaiting"],
-              ["Coins: 5.2g - OK",            "→ green LCD, auto-reset 3s"],
-              ["Coins: 3.1g - INSUFFICIENT",  "→ red LCD, retry in 5s"],
+              [`Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`,  "→ orange LCD, log entry"],
+              [`Pay ${PRODUCT_CATALOG.PHP5.label}`,                    "→ orange LCD, awaiting"],
+              [`Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`,  "→ orange LCD, log entry"],
+              [`Pay ${PRODUCT_CATALOG.PHP10.label}`,                    "→ orange LCD, awaiting"],
+              ["Coin Detected: 7.3g -> PHP5 ACCEPTED", "→ coin classified as ₱5"],
+              ["Coin Detected: 8.8g -> PHP10 ACCEPTED", "→ coin classified as ₱10"],
+              ["Coin Detected: 7.9g -> INVALID COIN", "→ rejected, not counted"],
+              ["Inserted: PHP5",               "→ running total paid"],
+              ["Remaining: PHP5",              "→ amount left to pay"],
+              ["Remaining: PHP0",              "→ fully paid"],
+              ["Dispensing Product...",        "→ payment complete"],
+              ["Payment OK",                   "→ success state + stats"],
               ["Add More Coins",              "→ red LCD"],
               ["Customer Left",               "→ blue LCD, ready"],
             ].map(([line, note]) => (

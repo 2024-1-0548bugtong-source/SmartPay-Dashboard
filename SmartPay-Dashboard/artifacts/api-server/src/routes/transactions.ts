@@ -74,13 +74,33 @@ router.get("/transactions/stats", async (_req, res) => {
   let verifiedCount = 0;
   let paymentEventCount = 0;
 
-  for (const row of todayRows) {
-    if (row.paymentStatus === "Verified") {
-      const match = row.product?.match(/PHP(\d+)/i);
+  const sorted = todayRows
+    .slice()
+    .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+  let lastKnownProduct: string | null = null;
+
+  for (const row of sorted) {
+    const ev = row.event.toLowerCase();
+
+    if (row.product) {
+      lastKnownProduct = row.product;
+    }
+
+    if (ev === "entry" || ev === "smartpay ready" || ev === "customer left") {
+      if (ev !== "entry") {
+        lastKnownProduct = null;
+      }
+    }
+
+    if (ev === "payment ok") {
+      const productStr = row.product ?? lastKnownProduct;
+      const match = productStr?.match(/PHP(\d+)/i);
       if (match) totalRevenue += parseInt(match[1], 10);
       verifiedCount++;
+      lastKnownProduct = null;
     }
-    if (row.paymentStatus != null) {
+    if (ev === "payment ok" || ev === "payment incomplete") {
       paymentEventCount++;
     }
   }
@@ -99,7 +119,16 @@ router.get("/transactions/stats", async (_req, res) => {
     const ev = lastEntry.event.toLowerCase();
     if (ev.includes("entry")) currentState = "Customer Present";
     else if (ev.includes("product removed")) currentState = "Customer Present";
-    else if (ev.includes("payment ok") || ev.includes("payment incomplete"))
+    else if (
+      ev.includes("payment ok") ||
+      ev.includes("payment incomplete") ||
+      ev.startsWith("pay ") ||
+      ev.includes("coin detected") ||
+      ev.includes("inserted balance") ||
+      ev.includes("remaining balance") ||
+      ev.includes("dispensing product") ||
+      ev.includes("add more")
+    )
       currentState = "Customer Present";
     else if (ev.includes("customer left")) currentState = "Ready";
   }

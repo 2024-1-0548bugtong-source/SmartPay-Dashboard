@@ -106,6 +106,7 @@ components:
         product:
           type: string
           nullable: true
+          description: Product label such as Product One (PHP5) or Product Two (PHP10)
         paymentStatus:
           type: string
           nullable: true
@@ -130,6 +131,7 @@ components:
         product:
           type: string
           nullable: true
+          description: Product label such as Product One (PHP5) or Product Two (PHP10)
         paymentStatus:
           type: string
           nullable: true
