@@ -95,14 +95,32 @@ export function incrementPirCounter(current: PirCounter): PirCounter {
 export function computePirFromTransactions(rows: TransactionRow[]): number {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  return rows.filter((r) => {
-    const ev = r.event.toLowerCase();
-    const isPirEvent =
-      ev === "entry" ||
-      ev === "customer entered" ||
-      ev === "customer_entered";
-    return isPirEvent && new Date(r.timestamp) >= today;
-  }).length;
+  const PIR_DEDUPE_WINDOW_MS = 4000;
+
+  const candidates = rows
+    .filter((r) => {
+      const ev = r.event.toLowerCase();
+      const isPirEvent =
+        ev === "entry" ||
+        ev === "customer entered" ||
+        ev === "customer_entered";
+      return isPirEvent && new Date(r.timestamp) >= today;
+    })
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  let count = 0;
+  let lastCountedAt = 0;
+
+  for (const row of candidates) {
+    const ts = new Date(row.timestamp).getTime();
+    if (!Number.isFinite(ts)) continue;
+    if (ts - lastCountedAt >= PIR_DEDUPE_WINDOW_MS) {
+      count += 1;
+      lastCountedAt = ts;
+    }
+  }
+
+  return count;
 }
 
 // ── CSV Export ────────────────────────────────────────────────────────────
