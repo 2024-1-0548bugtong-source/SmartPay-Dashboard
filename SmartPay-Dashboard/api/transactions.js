@@ -1,4 +1,5 @@
 const MAX_ROWS = 1000;
+const DEDUPE_WINDOW_MS = 3000;
 
 function getStore() {
   if (!globalThis.__smartpayTransactions) {
@@ -24,6 +25,28 @@ async function readJsonBody(req) {
   return JSON.parse(raw);
 }
 
+function normalizeText(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().toLowerCase();
+}
+
+function isDuplicateEvent(store, candidate) {
+  const now = Date.now();
+  return store.find((row) => {
+    const ts = Date.parse(row.timestamp);
+    if (!Number.isFinite(ts)) return false;
+    if (now - ts > DEDUPE_WINDOW_MS) return false;
+
+    return (
+      normalizeText(row.event) === normalizeText(candidate.event) &&
+      normalizeText(row.rawLine) === normalizeText(candidate.rawLine) &&
+      normalizeText(row.product) === normalizeText(candidate.product) &&
+      normalizeText(row.paymentStatus) === normalizeText(candidate.paymentStatus) &&
+      normalizeText(row.weight) === normalizeText(candidate.weight)
+    );
+  });
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") {
     return sendJson(res, 200, { ok: true });
@@ -42,9 +65,7 @@ module.exports = async function handler(req, res) {
         return sendJson(res, 400, { ok: false, error: "event is required" });
       }
 
-      const row = {
-        id: Date.now(),
-        timestamp: body.timestamp ? new Date(body.timestamp).toISOString() : new Date().toISOString(),
+      const candidate = {
         event: body.event,
         product: body.product ?? null,
         paymentStatus: body.paymentStatus ?? null,
@@ -52,10 +73,21 @@ module.exports = async function handler(req, res) {
         rawLine: body.rawLine ?? null,
       };
 
+      const duplicate = isDuplicateEvent(store, candidate);
+      if (duplicate) {
+        return sendJson(res, 200, { ok: true, duplicate: true, row: duplicate });
+      }
+
+      const row = {
+        id: Date.now(),
+        timestamp: body.timestamp ? new Date(body.timestamp).toISOString() : new Date().toISOString(),
+        ...candidate,
+      };
+
       store.unshift(row);
       if (store.length > MAX_ROWS) store.length = MAX_ROWS;
 
-      return sendJson(res, 201, row);
+      return sendJson(res, 201, { ok: true, duplicate: false, row });
     } catch (err) {
       return sendJson(res, 400, { ok: false, error: err.message || "invalid json" });
     }
