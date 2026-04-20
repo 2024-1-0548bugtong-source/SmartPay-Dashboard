@@ -326,16 +326,19 @@ export default function Dashboard() {
   // ── PIR count — derived from today's "Entry" rows in the transaction log ──
   const pirCount = computePirFromTransactions(transactions);
 
-  // ── Load from API on mount ──
+  // ── Fetch and poll transactions from API ──
   useEffect(() => {
-    fetch("/api/transactions")
-      .then((r) => r.json())
-      .then((apiRows: Array<{
-        id: number; timestamp: string; event: string;
-        product?: string | null; paymentStatus?: string | null;
-        weight?: string | null; rawLine?: string | null;
-      }>) => {
+    const fetchTransactions = async () => {
+      try {
+        const r = await fetch("/api/transactions");
+        const apiRows: Array<{
+          id: number; timestamp: string; event: string;
+          product?: string | null; paymentStatus?: string | null;
+          weight?: string | null; rawLine?: string | null;
+        }> = await r.json();
+        
         if (!Array.isArray(apiRows)) return;
+        
         setTransactions((prev) => {
           const existing = new Set(prev.map((r) => r.id));
           const fresh = apiRows
@@ -354,8 +357,18 @@ export default function Dashboard() {
             (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
           );
         });
-      })
-      .catch(() => {});
+      } catch (err) {
+        console.debug("Failed to fetch transactions:", err);
+      }
+    };
+
+    // Fetch immediately on mount
+    fetchTransactions();
+
+    // Then poll every 3 seconds for new transactions from the gateway
+    const interval = setInterval(fetchTransactions, 3000);
+    
+    return () => clearInterval(interval);
   }, []);
 
   // ── Core line handler (serial or manual) ──
