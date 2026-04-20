@@ -338,25 +338,21 @@ export default function Dashboard() {
         }> = await r.json();
         
         if (!Array.isArray(apiRows)) return;
-        
-        setTransactions((prev) => {
-          const existing = new Set(prev.map((r) => r.id));
-          const fresh = apiRows
-            .filter((r) => !existing.has(String(r.id)))
-            .map((r) => ({
-              id: String(r.id),
-              timestamp: r.timestamp,
-              event: r.event,
-              product: r.product ?? null,
-              paymentStatus: r.paymentStatus ?? null,
-              weight: r.weight ?? null,
-              rawLine: r.rawLine ?? null,
-            }));
-          if (!fresh.length) return prev;
-          return [...fresh, ...prev].sort(
-            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-          );
-        });
+
+        const normalized = apiRows
+          .map((r) => ({
+            id: String(r.id),
+            timestamp: r.timestamp,
+            event: r.event,
+            product: r.product ?? null,
+            paymentStatus: r.paymentStatus ?? null,
+            weight: r.weight ?? null,
+            rawLine: r.rawLine ?? null,
+          }))
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+        // Replace local state with API snapshot to avoid duplicate accumulation.
+        setTransactions(normalized);
       } catch (err) {
         console.debug("Failed to fetch transactions:", err);
       }

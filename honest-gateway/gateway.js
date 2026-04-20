@@ -8,18 +8,70 @@ const BAUD_RATE = 9600;
 
 // CHANGE THIS TO YOUR Vercel project base URL (no trailing slash)
 // Example: https://your-app.vercel.app
-const VERCEL_BASE_URL = "https://smartpay-dashboard-git-smartpay-5bec8c-chinne-bugtongs-projects.vercel.app";
+const VERCEL_BASE_URL = "https://smartpay-dashboard-two.vercel.app";
 const API_CANDIDATES = ["/api/transactions", "/api/events"];
+/**
+ * @type {string | null}
+ */
 let API_URL = null;
+const DUPLICATE_WINDOW_MS = 2500;
+/** @type {Record<string, number>} */
+const lastSentAt = {};
+
+/**
+ * @param {string} event
+ */
+function isForwardableEvent(event) {
+  const ev = event.toLowerCase();
+  return (
+    ev === "entry" ||
+    ev === "customer entered" ||
+    ev === "customer left" ||
+    ev === "smartpay ready" ||
+    ev === "payment ok" ||
+    ev === "add more coins" ||
+    ev === "dispensing product" ||
+    ev === "product removed" ||
+    ev === "coin detected" ||
+    ev === "inserted balance" ||
+    ev === "remaining balance" ||
+    ev.startsWith("pay ")
+  );
+}
+
+/**
+ * @param {{ event: string; rawLine: string | null }} payload
+ */
+function shouldDropDuplicate(payload) {
+  const key = `${payload.event.toLowerCase()}|${(payload.rawLine || "").toLowerCase()}`;
+  const now = Date.now();
+  const previous = lastSentAt[key] || 0;
+
+  if (now - previous < DUPLICATE_WINDOW_MS) {
+    return true;
+  }
+
+  lastSentAt[key] = now;
+  return false;
+}
 
 async function resolveApiUrl() {
   for (const path of API_CANDIDATES) {
     const url = `${VERCEL_BASE_URL}${path}`;
     try {
-      const res = await axios.get(url, { timeout: 5000 });
+      const res = await axios.get(url, {
+        timeout: 5000,
+        validateStatus: () => true,
+      });
+
+      // 2xx/4xx means route exists (401/403 is protected but valid).
       if (res.status >= 200 && res.status < 500) {
         API_URL = url;
-        console.log(`Using API endpoint: ${API_URL}`);
+        if (res.status === 401 || res.status === 403) {
+          console.log(`Using API endpoint: ${API_URL} (deployment protected)`);
+        } else {
+          console.log(`Using API endpoint: ${API_URL}`);
+        }
         return;
       }
     } catch {
@@ -27,12 +79,13 @@ async function resolveApiUrl() {
     }
   }
 
-  API_URL = `${VERCEL_BASE_URL}/api/events`;
-  console.error("No supported API endpoint found on this deployment.");
-  console.error("Tried:", API_CANDIDATES.map((p) => `${VERCEL_BASE_URL}${p}`).join(" , "));
-  console.error("If this is a static-only Vercel build, API routes do not exist.");
+  API_URL = `${VERCEL_BASE_URL}/api/transactions`;
+  console.log(`Using API endpoint: ${API_URL} (endpoint detection failed, assuming it exists)`);
 }
 
+/**
+ * @param {string} line
+ */
 function parseTextLine(line) {
   const raw = line.trim();
   if (!raw) return null;
@@ -75,6 +128,8 @@ function parseTextLine(line) {
     event = "Inserted Balance";
   } else if (/^remaining:\s*(php|₱)\s*\d+/i.test(raw)) {
     event = "Remaining Balance";
+  } else {
+    return null;
   }
 
   return {
@@ -87,6 +142,9 @@ function parseTextLine(line) {
   };
 }
 
+/**
+ * @param {string} line
+ */
 function parseLineToPayload(line) {
   const raw = line.trim();
   if (!raw) return null;
@@ -143,8 +201,8 @@ parser.on("data", async (line) => {
   const payload = parseLineToPayload(line);
   if (!payload) return;
 
-  // Drop telemetry-only noise to keep table clean.
-  if (payload.event.toLowerCase() === "telemetry") return;
+  if (!isForwardableEvent(payload.event)) return;
+  if (shouldDropDuplicate(payload)) return;
 
   try {
     if (!API_URL) {

@@ -32,6 +32,8 @@ HX711 coinScale;
 
 long baseline = 0;
 bool personDetected = false;
+unsigned long lastEntryEventMs = 0;
+const unsigned long ENTRY_COOLDOWN_MS = 3000;
 
 /* ================= LCD ================= */
 LiquidCrystal_I2C lcd(0x27, 20, 4);
@@ -80,8 +82,6 @@ void setup() {
   }
   baseline = sum / 5;
 
- Serial.print("Baseline distance: ");
-  Serial.println(baseline);
   //bluetooth part==========================
   if (hc05Enabled) hc05Serial.begin(9600);
 
@@ -140,13 +140,12 @@ void loop() {
   long distance = getDistance();
   if (distance < 0) return;
 
-  Serial.print("Distance: ");
-  Serial.println(distance);
-
   // 🔥 detect if something is closer than normal
-  if ((baseline - distance) > CHANGE_THRESHOLD && !personDetected) {
+  unsigned long nowMs = millis();
+  if ((baseline - distance) > CHANGE_THRESHOLD && !personDetected && (nowMs - lastEntryEventMs) >= ENTRY_COOLDOWN_MS) {
     beepTwice();
     personDetected = true;
+    lastEntryEventMs = nowMs;
 
     entryCounter++;
     char entryMsg[24];
@@ -233,23 +232,6 @@ void loop() {
   if (checkoutActive && insertedAmount >= requiredAmount && requiredAmount > 0) {
     paymentOK = true;
   }
-  // 🔥 DEBUG OUTPUT (Serial Monitor)
-  Serial.print("Product Weight: ");
-  Serial.print(productW);
-  Serial.print(" g | ");
-
-  Serial.print("Coin Weight: ");
-  Serial.print(coinW);
-  Serial.print(" g | ");
-
-  Serial.print("Product Type: ");
-  Serial.print(productType);
-
-  Serial.print(" | Coin Value: ");
-  Serial.print(coinValue);
-
-  Serial.print(" | Payment: ");
-  Serial.println(paymentOK ? "OK" : "NOT OK");
   updateLCD(productType, productW, coinValue, paymentOK);
 
   previousProductType = productType;
