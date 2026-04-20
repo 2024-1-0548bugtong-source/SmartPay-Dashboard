@@ -6,5 +6,30 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0"
-  }
+  },
+  "name": "smartpay-dashboard",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "dependencies": {
+    "@serialport/parser-readline": "^13.0.0",
+    "node-fetch": "^3.3.2",
+    "serialport": "^13.0.0",
+    "undici-types": "^7.18.2"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2024-1-0548bugtong-source/SmartPay-Dashboard.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/2024-1-0548bugtong-source/SmartPay-Dashboard/issues"
+  },
+  "homepage": "https://github.com/2024-1-0548bugtong-source/SmartPay-Dashboard#readme"
 }

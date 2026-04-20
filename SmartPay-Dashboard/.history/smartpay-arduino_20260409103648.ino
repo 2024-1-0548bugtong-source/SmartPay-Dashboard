@@ -9,16 +9,7 @@
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include <SoftwareSerial.h>
 #include "HX711.h"
-
-// ── HC-05 Bluetooth Configuration ─────────────────────────────────────
-// Configure these pins for HC-05 communication (must be digital pins that support SoftwareSerial)
-// For Arduino Nano: pins 0 and 1 are hardware serial, so we use pins 10 and 11 for software serial
-#define HC05_RX_PIN 10    // Connect HC-05 TX to pin 10
-#define HC05_TX_PIN 11    // Connect HC-05 RX to pin 11
-SoftwareSerial hc05Serial(HC05_RX_PIN, HC05_TX_PIN);  // RX, TX
-bool hc05Enabled = true;  // Set to false if HC-05 is not connected
 
 // ── Pins ──────────────────────────────────────────────────────────────
 
@@ -34,9 +25,8 @@ bool hc05Enabled = true;  // Set to false if HC-05 is not connected
 // Buzzer
 #define BUZZER_PIN 7
 
-// Single external waiting-for-payment LED (placed near buzzer)
-// Use D8 so wiring sits next to buzzer on D7.
-#define LED_WAITING 8
+// Waiting-for-payment LED
+#define LED_WAITING 13
 
 // LCD I2C address (usually 0x27 or 0x3F, adjust if needed)
 #define LCD_I2C_ADDR 0x27
@@ -93,12 +83,6 @@ bool coinLatched = false;
 
 void setup() {
   Serial.begin(9600);
-  
-  // Initialize HC-05 Bluetooth at 9600 baud (default HC-05 baudrate)
-  if (hc05Enabled) {
-    hc05Serial.begin(9600);
-  }
-  
   pinMode(PIR_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(LED_WAITING, OUTPUT);
@@ -121,7 +105,7 @@ void setup() {
   lcd.print("SmartPay Ready");
   
   // Send to serial
-  sendMessage("SmartPay Ready");
+  Serial.println("SmartPay Ready");
   
   delay(1000);
   lcd.clear();
@@ -180,8 +164,9 @@ void handleReady(bool pirDetected) {
     transitionTo(STATE_CUSTOMER_DETECTED);
     
     // Send entry event
-    sendEntryCount(entryCount);
-    sendMessage("Customer Entered");
+    Serial.print("Entry: ");
+    Serial.println(entryCount);
+    Serial.println("Customer Entered");
     
     lcdShow("Customer", "Entered");
     buzz(150);
@@ -193,7 +178,7 @@ void handleCustomerDetected(float productWeight, bool pirDetected) {
     // Customer left without buying
     digitalWrite(LED_WAITING, LOW);
     transitionTo(STATE_READY);
-    sendMessage("Customer Left");
+    Serial.println("Customer Left");
     lcdShow("SmartPay", "Ready");
     return;
   }
@@ -206,7 +191,7 @@ void handleCustomerDetected(float productWeight, bool pirDetected) {
       paidAmount = 0;
       transitionTo(STATE_PRODUCT_SELECTED);
       digitalWrite(LED_WAITING, HIGH);
-      sendMessage("Product Removed. Pay Product One (PHP5).");
+      Serial.println("Product Removed. Pay Product One (PHP5).");
       lcdShow("Product One", "PHP5");
       buzz(100);
       delay(500);
@@ -216,7 +201,7 @@ void handleCustomerDetected(float productWeight, bool pirDetected) {
       paidAmount = 0;
       transitionTo(STATE_PRODUCT_SELECTED);
       digitalWrite(LED_WAITING, HIGH);
-      sendMessage("Product Removed. Pay Product Two (PHP10).");
+      Serial.println("Product Removed. Pay Product Two (PHP10).");
       lcdShow("Product Two", "PHP10");
       buzz(100);
       delay(500);
@@ -229,10 +214,10 @@ void handleProductSelected() {
   transitionTo(STATE_WAITING_FOR_COIN);
   digitalWrite(LED_WAITING, HIGH);
   if (selectedProduct == 1) {
-    sendMessage("Pay Product One (PHP5)");
+    Serial.println("Pay Product One (PHP5)");
     lcdShow("Pay", "Product One");
   } else {
-    sendMessage("Pay Product Two (PHP10)");
+    Serial.println("Pay Product Two (PHP10)");
     lcdShow("Pay", "Product Two");
   }
 }
@@ -262,14 +247,22 @@ void handleCoinValidated(float coinWeight) {
 
   if (lastCoinValue > 0) {
     paidAmount += lastCoinValue;
-    sendCoinResult(lastCoinWeight, lastCoinValue);
+    Serial.print("Coin Detected: ");
+    Serial.print(lastCoinWeight, 1);
+    Serial.print("g -> PHP");
+    Serial.print(lastCoinValue);
+    Serial.println(" ACCEPTED");
   } else {
-    sendCoinResult(lastCoinWeight, -1);
+    Serial.print("Coin Detected: ");
+    Serial.print(lastCoinWeight, 1);
+    Serial.println("g -> INVALID COIN");
   }
 
-  sendCurrencyLine("Inserted", paidAmount);
+  Serial.print("Inserted: PHP");
+  Serial.println(paidAmount);
 
-  sendCurrencyLine("Remaining", remainingAmount());
+  Serial.print("Remaining: PHP");
+  Serial.println(remainingAmount());
 
   if (paidAmount >= requiredAmount()) {
     paymentOk = true;
@@ -277,8 +270,8 @@ void handleCoinValidated(float coinWeight) {
 
   if (paymentOk) {
     transitionTo(STATE_PAYMENT_OK);
-    sendMessage("Dispensing Product...");
-    sendMessage("Payment OK");
+    Serial.println("Dispensing Product...");
+    Serial.println("Payment OK");
     lcdShow("Payment OK", "Thank you!");
     buzz(200);
     delay(300);
@@ -286,7 +279,7 @@ void handleCoinValidated(float coinWeight) {
     return;
   }
 
-  sendMessage("Add More Coins");
+  Serial.println("Add More Coins");
   lcdShow("Add More", "Coins");
   buzz(100);
   transitionTo(STATE_PAYMENT_FAILED);
@@ -302,8 +295,8 @@ void handlePaymentOk() {
   // Reset after 3 seconds
   if (millis() - stateChangeTime > 3000) {
     transitionTo(STATE_READY);
-    sendMessage("Customer Left");
-    sendMessage("SmartPay Ready");
+    Serial.println("Customer Left");
+    Serial.println("SmartPay Ready");
     lcdShow("SmartPay", "Ready");
     coinScale.tare();
     productScale.tare();
@@ -322,8 +315,8 @@ void handlePaymentFailed(float coinWeight) {
   // Timeout if user leaves coins sitting or no valid follow-up happens.
   if (millis() - stateChangeTime > 5000) {
     transitionTo(STATE_READY);
-    sendMessage("Customer Left");
-    sendMessage("SmartPay Ready");
+    Serial.println("Customer Left");
+    Serial.println("SmartPay Ready");
     lcdShow("SmartPay", "Ready");
     coinScale.tare();
     productScale.tare();
@@ -377,28 +370,6 @@ int classifyCoin(float weight) {
   return -1;
 }
 
-void sendEntryCount(int count) {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "Entry: %d", count);
-  sendMessage(buf);
-}
-
-void sendCurrencyLine(const char* label, int amount) {
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%s: PHP%d", label, amount);
-  sendMessage(buf);
-}
-
-void sendCoinResult(float weight, int coinValue) {
-  char buf[48];
-  if (coinValue > 0) {
-    snprintf(buf, sizeof(buf), "Coin Detected: %.1fg -> PHP%d ACCEPTED", weight, coinValue);
-  } else {
-    snprintf(buf, sizeof(buf), "Coin Detected: %.1fg -> INVALID COIN", weight);
-  }
-  sendMessage(buf);
-}
-
 // ── Calibration Helper (uncomment to run) ──────────────────────────────
 
 /*
@@ -421,15 +392,3 @@ void calibrateLoadCells() {
   }
 }
 */
-
-// ── HC-05 Helper Function ─────────────────────────────────────────────
-
-void sendMessage(const char* message) {
-  // Send to USB serial (dashboard)
-  Serial.println(message);
-  
-  // Send to HC-05 Bluetooth if enabled
-  if (hc05Enabled) {
-    hc05Serial.println(message);
-  }
-}

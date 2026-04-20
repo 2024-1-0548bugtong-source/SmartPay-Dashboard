@@ -97,11 +97,7 @@ export function computePirFromTransactions(rows: TransactionRow[]): number {
   today.setHours(0, 0, 0, 0);
   return rows.filter((r) => {
     const ev = r.event.toLowerCase();
-    const isPirEvent =
-      ev === "entry" ||
-      ev === "customer entered" ||
-      ev === "customer_entered";
-    return isPirEvent && new Date(r.timestamp) >= today;
+    return ev === "entry" && new Date(r.timestamp) >= today;
   }).length;
 }
 

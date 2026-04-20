@@ -305,6 +305,7 @@ export default function Dashboard() {
   const [recentPirFlash, setRecentPirFlash] = useState(false);
   const [demoRunning, setDemoRunning] = useState(false);
   const [serialLcdState, setSerialLcdState] = useState<LcdState | null>(null);
+  const [serialDebugLines, setSerialDebugLines] = useState<string[]>([]);
 
   const portRef = useRef<SerialPort | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -359,6 +360,11 @@ export default function Dashboard() {
 
   // ── Core line handler (serial or manual) ──
   const handleLine = useCallback((rawLine: string) => {
+    const trimmed = rawLine.trim();
+    if (trimmed) {
+      setSerialDebugLines((prev) => [trimmed, ...prev].slice(0, 40));
+    }
+
     const parsed = parseSerialLine(rawLine);
     if (!parsed) return;
 
@@ -477,8 +483,8 @@ export default function Dashboard() {
 
   const stats = computeStats(transactions);
 
-  const latestInserted = transactions.find((r) => r.event === "Inserted Balance");
-  const latestRemaining = transactions.find((r) => r.event === "Remaining Balance");
+  const latestInserted = transactions.find((r) => /inserted/i.test(r.event));
+  const latestRemaining = transactions.find((r) => /remaining/i.test(r.event));
   const insertedAmount = extractPhpAmount(latestInserted?.rawLine ?? null);
   const remainingAmount = extractPhpAmount(latestRemaining?.rawLine ?? null);
 
@@ -748,6 +754,29 @@ export default function Dashboard() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          {/* ── Raw Serial Debug ── */}
+          <div className="bg-card border border-card-border rounded-xl shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+              <h2 className="font-bold text-base">Raw Serial Debug</h2>
+              <span className="text-xs text-muted-foreground">latest {serialDebugLines.length} lines</span>
+            </div>
+            <div className="max-h-56 overflow-y-auto bg-muted/20">
+              {serialDebugLines.length === 0 ? (
+                <div className="px-5 py-8 text-sm text-muted-foreground">
+                  No raw serial lines yet. Connect HC-05 and trigger the Arduino output.
+                </div>
+              ) : (
+                <ul className="divide-y divide-border text-xs font-mono">
+                  {serialDebugLines.map((line, index) => (
+                    <li key={`${line}-${index}`} className="px-5 py-2 whitespace-pre-wrap wrap-break-word">
+                      {line}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
 

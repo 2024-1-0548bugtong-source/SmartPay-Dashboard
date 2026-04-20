@@ -94,9 +94,130 @@ export function lcdPad(s: string): string {
   return s.slice(0, LCD_COLS).padEnd(LCD_COLS, " ");
 }
 
+function normalizeEventName(event: string): string {
+  const ev = event.trim().toLowerCase();
+  if (ev === "customer_entered" || ev === "customer entered") return "Customer Entered";
+  if (ev === "customer_left" || ev === "customer left") return "Customer Left";
+  if (ev === "smartpay ready" || ev === "ready") return "SmartPay Ready";
+  if (ev === "payment ok" || ev === "payment_success" || ev === "payment success") return "Payment OK";
+  if (ev === "payment incomplete" || ev === "payment_fail" || ev === "payment failed") return "Payment Incomplete";
+  if (ev === "add more coins") return "Add More Coins";
+  if (ev === "dispensing product" || ev === "dispense") return "Dispensing Product";
+  if (ev === "product removed") return "Product Removed";
+  if (ev === "insert coins" || ev === "insert coin") return "Insert Coins";
+  if (ev === "coin detected") return "Coin Detected";
+  if (ev === "entry") return "Entry";
+  return event.trim();
+}
+
+function parseJsonSerialLine(raw: string): ParsedSerialLine | null {
+  if (!raw.startsWith("{")) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const eventRaw = typeof parsed.event === "string" ? parsed.event.trim() : null;
+    const statusRaw = typeof parsed.status === "string" ? parsed.status.trim() : null;
+
+    const event = eventRaw ? normalizeEventName(eventRaw) : null;
+    const status = statusRaw ? normalizeEventName(statusRaw) : null;
+
+    const product = (() => {
+      if (typeof parsed.product === "string") return formatProductLabel(parsed.product);
+      if (typeof parsed.product === "number") {
+        if (parsed.product === 1) return PRODUCT_CATALOG.PHP5.label;
+        if (parsed.product === 2) return PRODUCT_CATALOG.PHP10.label;
+      }
+      return null;
+    })();
+
+    const coinValue = typeof parsed.coin === "number" ? parsed.coin : null;
+    const coinProduct = coinValue === 5 ? PRODUCT_CATALOG.PHP5.label : coinValue === 10 ? PRODUCT_CATALOG.PHP10.label : null;
+    const paymentStatus = typeof parsed.paymentStatus === "string"
+      ? parsed.paymentStatus
+      : typeof parsed.payment === "string"
+        ? parsed.payment.toLowerCase() === "success"
+          ? "Verified"
+          : parsed.payment.toLowerCase() === "fail"
+            ? "Insufficient"
+            : null
+        : null;
+
+    const numericWeight = typeof parsed.weight === "number"
+      ? parsed.weight
+      : typeof parsed.product_w === "number"
+        ? parsed.product_w
+        : typeof parsed.coin_w === "number"
+          ? parsed.coin_w
+          : null;
+
+    const inserted = typeof parsed.inserted === "number" ? parsed.inserted : null;
+    const remaining = typeof parsed.remaining === "number" ? parsed.remaining : null;
+
+    const telemetryPresent =
+      typeof parsed.product_w === "number" ||
+      typeof parsed.coin_w === "number" ||
+      typeof parsed.inserted === "number" ||
+      typeof parsed.remaining === "number";
+
+    const resolvedEvent =
+      event ??
+      status ??
+      (typeof parsed.payment === "string"
+        ? parsed.payment.toLowerCase() === "success"
+          ? "Payment OK"
+          : parsed.payment.toLowerCase() === "fail"
+            ? "Payment Incomplete"
+            : null
+        : null) ??
+      (coinValue !== null && coinValue > 0 ? "Coin Detected" : null) ??
+      (typeof parsed.inserted === "number" ? "Inserted Balance" : null) ??
+      (typeof parsed.remaining === "number" ? "Remaining Balance" : null) ??
+      (telemetryPresent ? "Telemetry" : null);
+    if (!resolvedEvent) return null;
+
+    const normalized = resolvedEvent.toLowerCase();
+    const lcdState: LcdState | null = (() => {
+      if (normalized === "smartpay ready") return { line1: lcdPad("** SmartPay **"), line2: lcdPad("    Ready"), theme: "ready" };
+      if (normalized === "customer entered") return { line1: lcdPad("Customer Entered"), line2: lcdPad("  Please wait..."), theme: "entry" };
+      if (normalized === "product removed") return { line1: lcdPad("Product Removed"), line2: lcdPad(`  Pay ${product ?? "coins"}`), theme: "payment" };
+      if (normalized.startsWith("pay ")) return { line1: lcdPad("Insert Coins:"), line2: lcdPad(`  Please pay ${product?.replace(/^.*\((PHP\d+)\).*$/i, "$1") ?? "coins"}`), theme: "payment" };
+      if (normalized === "payment ok") return { line1: lcdPad("** Payment OK! **"), line2: lcdPad(" Thank you! :)"), theme: "ok" };
+      if (normalized === "payment incomplete") return { line1: lcdPad("Insufficient!"), line2: lcdPad("Add More Coins"), theme: "error" };
+      if (normalized === "add more coins") return { line1: lcdPad("Insufficient!"), line2: lcdPad("Add More Coins"), theme: "error" };
+      if (normalized === "entry") return { line1: lcdPad("Customer Entered"), line2: lcdPad("  Please wait..."), theme: "entry" };
+      if (normalized === "dispensing product") return { line1: lcdPad("Dispensing..."), line2: lcdPad(" Please wait"), theme: "ok" };
+      if (normalized === "coin detected") return { line1: lcdPad(`Coins:${inserted ?? 0}`), line2: lcdPad(remaining !== null && remaining > 0 ? "Insert Coins..." : "Checking..."), theme: "info" };
+      if (normalized === "telemetry") return { line1: lcdPad(`P:${parsed.product_w ?? 0}`), line2: lcdPad(`C:${parsed.coin_w ?? 0}`), theme: "info" };
+      return null;
+    })();
+
+    const isPirEntry = normalized === "entry" || normalized === "customer entered";
+    const isLogEntry = normalized !== "telemetry";
+
+    return {
+      event: resolvedEvent,
+      product: product ?? (resolvedEvent === "Coin Detected" ? coinProduct : null),
+      paymentStatus,
+      weight: numericWeight !== null ? `${numericWeight.toFixed(2)}g` : null,
+      rawLine: raw,
+      isLogEntry,
+      isPirEntry,
+      lcdState,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function parseSerialLine(line: string): ParsedSerialLine | null {
   const raw = line.trim();
   if (!raw) return null;
+
+  if (raw.startsWith("{")) {
+    // If a payload is JSON-ish, don't fall back to generic text parsing.
+    // Invalid/incomplete JSON should be ignored instead of polluting the table.
+    return parseJsonSerialLine(raw);
+  }
 
   // Telemetry line format from the 24x4 hardware sketch:
   // "Product: <x> g  |  Coin: <y> g"
