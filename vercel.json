@@ -1,9 +1,18 @@
 {
   "version": 2,
   "installCommand": "cd SmartPay-Dashboard && npx pnpm@10.33.0 install --no-frozen-lockfile",
-  "buildCommand": "cd SmartPay-Dashboard && npx pnpm@10.33.0 --filter @workspace/smartpay-dashboard run build",
+  "buildCommand": "cd SmartPay-Dashboard && npx pnpm@10.33.0 --filter @workspace/smartpay-dashboard run build && cp -r api ../api",
   "outputDirectory": "SmartPay-Dashboard/artifacts/smartpay-dashboard/dist",
+  "functions": {
+    "api/**.js": {
+      "runtime": "nodejs18.x"
+    }
+  },
   "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
     {
       "handle": "filesystem"
     },
