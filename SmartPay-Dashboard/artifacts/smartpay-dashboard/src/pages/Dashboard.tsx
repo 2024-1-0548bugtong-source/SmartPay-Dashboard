@@ -299,6 +299,8 @@ function StatusBadge({ status }: { status: string | null }) {
 export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(loadDarkMode);
   const [transactions, setTransactions] = useState<TransactionRow[]>(loadTransactions);
+  const [livePirCount, setLivePirCount] = useState<number | null>(null);
+  const [counterStatus, setCounterStatus] = useState("loading");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [manualLine, setManualLine] = useState("");
@@ -325,6 +327,41 @@ export default function Dashboard() {
 
   // ── PIR count — derived from today's "Entry" rows in the transaction log ──
   const pirCount = computePirFromTransactions(transactions);
+  const displayedPirCount = livePirCount ?? pirCount;
+
+  // ── Live counter from deployed Vercel API ──
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchCounter = async () => {
+      try {
+        const res = await fetch("/api/counter");
+        const data = await res.json();
+
+        if (cancelled) return;
+
+        if (data && typeof data.count === "number") {
+          setLivePirCount(data.count);
+          setCounterStatus("live");
+        } else {
+          setCounterStatus("no-data");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.debug("Failed to fetch live counter:", err);
+          setCounterStatus("offline");
+        }
+      }
+    };
+
+    fetchCounter();
+    const interval = setInterval(fetchCounter, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   // ── Fetch and poll transactions from API ──
   useEffect(() => {
@@ -531,7 +568,7 @@ export default function Dashboard() {
               {/* PIR counter */}
               <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-bold transition-all duration-300 ${recentPirFlash ? "bg-green-500/30 text-green-200 scale-105" : "bg-white/10 text-blue-100"}`}>
                 <span>👁</span>
-                <span>Entries: {pirCount}</span>
+                <span>Entries: {displayedPirCount}</span>
                 {recentPirFlash && <span className="text-green-300 animate-bounce">↑</span>}
               </div>
               {/* Revenue */}
@@ -661,8 +698,11 @@ export default function Dashboard() {
                   {recentPirFlash && <span className="text-green-500 font-bold text-lg animate-bounce">+1 ↑</span>}
                 </div>
                 <div className="flex items-end gap-3 mt-1">
-                  <span className="text-4xl font-extrabold text-primary dark:text-blue-400">{pirCount}</span>
+                  <span className="text-4xl font-extrabold text-primary dark:text-blue-400">{displayedPirCount}</span>
                   <span className="text-sm text-muted-foreground mb-1">customers today</span>
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  Live source: {counterStatus === "live" ? "/api/counter" : counterStatus === "loading" ? "loading..." : "transaction fallback"}
                 </div>
               </div>
             </div>
