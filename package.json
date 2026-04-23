@@ -13,11 +13,17 @@
   "main": "index.js",
   "dependencies": {
     "@serialport/parser-readline": "^13.0.0",
+    "express": "^5.2.1",
     "node-fetch": "^3.3.2",
     "serialport": "^13.0.0",
+    "socket.io": "^4.8.3",
     "undici-types": "^7.18.2"
   },
   "scripts": {
+    "serial:list": "node index.js --list",
+    "serial:read": "node index.js",
+    "bridge:vercel": "node bridge-json-vercel.js",
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
