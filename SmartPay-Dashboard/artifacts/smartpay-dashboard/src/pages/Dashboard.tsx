@@ -705,6 +705,26 @@ export default function Dashboard() {
                   Live source: {counterStatus === "live" ? "/api/counter" : counterStatus === "loading" ? "loading..." : "transaction fallback"}
                 </div>
               </div>
+
+              {/* Live counter API card */}
+              <div className="bg-card border border-card-border rounded-xl p-4 shadow-sm">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-2xl">📡</span>
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Live Counter API</span>
+                  </div>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${counterStatus === "live" ? "bg-green-100 text-green-700 dark:bg-green-900/60 dark:text-green-200" : counterStatus === "loading" ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/60 dark:text-yellow-200" : "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"}`}>
+                    {counterStatus === "live" ? "live" : counterStatus === "loading" ? "loading" : "fallback"}
+                  </span>
+                </div>
+                <div className="flex items-end gap-3">
+                  <span className="text-3xl font-extrabold text-primary dark:text-blue-400">{livePirCount ?? pirCount}</span>
+                  <span className="text-sm text-muted-foreground mb-1">current count</span>
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  Source: {counterStatus === "live" ? "/api/counter" : "transaction fallback"}
+                </div>
+              </div>
             </div>
           </div>
 
