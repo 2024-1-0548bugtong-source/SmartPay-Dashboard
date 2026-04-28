@@ -100,8 +100,10 @@ function normalizeEventName(event: string): string {
   if (ev === "customer_left" || ev === "customer left") return "Customer Left";
   if (ev === "smartpay ready" || ev === "honestpay ready" || ev === "ready") return "HonestPay Ready";
   if (ev === "payment ok" || ev === "payment_success" || ev === "payment success") return "Payment OK";
+  if (ev === "payment invalid" || ev === "payment_invalid") return "Invalid Coin";
   if (ev === "payment incomplete" || ev === "payment_fail" || ev === "payment failed") return "Payment Incomplete";
   if (ev === "add more coins") return "Add More Coins";
+  if (ev.startsWith("payment status:")) return "Invalid Coin";
   if (ev === "dispensing product" || ev === "dispense") return "Dispensing Product";
   if (ev === "product removed") return "Product Removed";
   if (ev === "insert coins" || ev === "insert coin") return "Insert Coins";
@@ -173,7 +175,7 @@ function parseJsonSerialLine(raw: string): ParsedSerialLine | null {
       (typeof parsed.inserted === "number" ? "Inserted Balance" : null) ??
       (typeof parsed.remaining === "number" ? "Remaining Balance" : null) ??
       (telemetryPresent ? "Telemetry" : null);
-    if (!resolvedEvent) return null;
+    if (!resolvedEvent || resolvedEvent === "Remaining Balance") return null;
 
     const normalized = resolvedEvent.toLowerCase();
     const lcdState: LcdState | null = (() => {
@@ -182,11 +184,12 @@ function parseJsonSerialLine(raw: string): ParsedSerialLine | null {
       if (normalized === "product removed") return { line1: lcdPad("Product Removed"), line2: lcdPad(`  Pay ${product ?? "coins"}`), theme: "payment" };
       if (normalized.startsWith("pay ")) return { line1: lcdPad("Insert Coins:"), line2: lcdPad(`  Please pay ${product?.replace(/^.*\((PHP\d+)\).*$/i, "$1") ?? "coins"}`), theme: "payment" };
       if (normalized === "payment ok") return { line1: lcdPad("** Payment OK! **"), line2: lcdPad(" Thank you! :)"), theme: "ok" };
-      if (normalized === "payment incomplete") return { line1: lcdPad("Insufficient!"), line2: lcdPad("Add More Coins"), theme: "error" };
-      if (normalized === "add more coins") return { line1: lcdPad("Insufficient!"), line2: lcdPad("Add More Coins"), theme: "error" };
+      if (normalized === "invalid coin") return { line1: lcdPad("Invalid Coin"), line2: lcdPad(paymentStatus === "No coin detected" ? " No coin detect" : " Insufficient"), theme: "error" };
+      if (normalized === "payment incomplete") return { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" };
+      if (normalized === "add more coins") return { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" };
       if (normalized === "entry") return { line1: lcdPad("Customer Entered"), line2: lcdPad("  Please wait..."), theme: "entry" };
       if (normalized === "dispensing product") return { line1: lcdPad("Dispensing..."), line2: lcdPad(" Please wait"), theme: "ok" };
-      if (normalized === "coin detected") return { line1: lcdPad(`Coins:${inserted ?? 0}`), line2: lcdPad(remaining !== null && remaining > 0 ? "Insert Coins..." : "Checking..."), theme: "info" };
+      if (normalized === "coin detected") return { line1: lcdPad("Coin Detected"), line2: lcdPad(`${product ? ` ${product.replace(/^.*\((PHP\d+)\).*$/i, "$1")}` : ""}${numericWeight !== null ? ` ${numericWeight.toFixed(2)}g` : ""}`.trim() || " Validating"), theme: "info" };
       if (normalized === "telemetry") return { line1: lcdPad(`P:${parsed.product_w ?? 0}`), line2: lcdPad(`C:${parsed.coin_w ?? 0}`), theme: "info" };
       return null;
     })();
@@ -344,7 +347,7 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad("Insert Coins..."), theme: "error" },
+      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" },
     };
   }
 
@@ -375,6 +378,77 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
       isLogEntry: true,
       isPirEntry: false,
       lcdState: { line1: lcdPad("Customer Entered"), line2: lcdPad("  Please wait..."), theme: "entry" },
+    };
+  }
+
+  // Contract line: "no product - P1: 200g =P5"
+  const contractProductRemovedMatch = raw.match(/^no\s+product\s*-\s*(p[12])\s*:\s*([+-]?\d+(?:\.\d+)?)g\s*=\s*p(?:5|10)$/i);
+  if (contractProductRemovedMatch) {
+    const product = formatProductLabel(contractProductRemovedMatch[1]);
+    const price = formatProductPrice(contractProductRemovedMatch[1]);
+    const weight = `${Number(contractProductRemovedMatch[2]).toFixed(2)}g`;
+    return {
+      event: "Product Removed",
+      product,
+      paymentStatus: product ? "Pending" : null,
+      weight,
+      rawLine: raw,
+      isLogEntry: true,
+      isPirEntry: false,
+      lcdState: product
+        ? { line1: lcdPad("Product Removed"), line2: lcdPad(`  Pay ${price ?? "coins"}`), theme: "payment" }
+        : { line1: lcdPad("Product Removed"), line2: lcdPad("  Insert coins"), theme: "payment" },
+    };
+  }
+
+  // Contract line: "insert coin - COIN : 5PESOS"
+  const contractInsertCoinMatch = raw.match(/^insert\s+coin\s*-\s*coin\s*:\s*(5|10)\s*pesos$/i);
+  if (contractInsertCoinMatch) {
+    const product = formatProductLabel(`PHP${contractInsertCoinMatch[1]}`);
+    return {
+      event: "Inserted Balance",
+      product,
+      paymentStatus: "Pending",
+      weight: null,
+      rawLine: raw,
+      isLogEntry: true,
+      isPirEntry: false,
+      lcdState: { line1: lcdPad("Inserted Balance"), line2: lcdPad(` PHP${contractInsertCoinMatch[1]}`), theme: "payment" },
+    };
+  }
+
+  // Contract line: "insert coin - (no coin)"
+  if (/^insert\s+coin\s*-\s*\(no\s+coin\)$/i.test(raw)) {
+    return {
+      event: "Invalid Coin",
+      product: null,
+      paymentStatus: "No coin detected",
+      weight: null,
+      rawLine: raw,
+      isLogEntry: true,
+      isPirEntry: false,
+      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(" No coin detect"), theme: "error" },
+    };
+  }
+
+  const paymentStatusMatch = raw.match(/^payment\s+status:\s*(insufficient|no\s+coin\s+detected)$/i);
+  if (paymentStatusMatch) {
+    const paymentStatus = paymentStatusMatch[1].toLowerCase() === "insufficient"
+      ? "Insufficient"
+      : "No coin detected";
+    return {
+      event: "Invalid Coin",
+      product: null,
+      paymentStatus,
+      weight: null,
+      rawLine: raw,
+      isLogEntry: false,
+      isPirEntry: false,
+      lcdState: {
+        line1: lcdPad("Invalid Coin"),
+        line2: lcdPad(paymentStatus === "Insufficient" ? " Insufficient" : " No coin detect"),
+        theme: "error",
+      },
     };
   }
 
@@ -409,17 +483,45 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
     };
   }
 
-  // "Add More Coins"
-  if (/^add more coins/i.test(raw)) {
+  // Contract line: "waiting payment - PAYMENT SUCCESS"
+  if (/^waiting\s+payment\s*-\s*payment\s+success$/i.test(raw)) {
     return {
-      event: "Add More Coins",
+      event: "Payment OK",
+      product: null,
+      paymentStatus: "Verified",
+      weight: null,
+      rawLine: raw,
+      isLogEntry: true,
+      isPirEntry: false,
+      lcdState: { line1: lcdPad("** Payment OK! **"), line2: lcdPad(" Thank you! :)"), theme: "ok" },
+    };
+  }
+
+  // Contract line: "PAYMENT INVALID" or "waiting payment - PAYMENT INVALID"
+  if (/^(?:waiting\s+payment\s*-\s*)?payment\s+invalid$/i.test(raw)) {
+    return {
+      event: "Invalid Coin",
       product: null,
       paymentStatus: "Insufficient",
       weight: null,
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("Insufficient!"), line2: lcdPad("Add More Coins"), theme: "error" },
+      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" },
+    };
+  }
+
+  // "Add More Coins"
+  if (/^add more coins/i.test(raw)) {
+    return {
+      event: "Invalid Coin",
+      product: null,
+      paymentStatus: "Insufficient",
+      weight: null,
+      rawLine: raw,
+      isLogEntry: true,
+      isPirEntry: false,
+      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" },
     };
   }
 
@@ -464,9 +566,10 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
   }
 
   // "Coin Detected: 7.3g -> PHP5 ACCEPTED"
-  const coinAcceptedMatch = raw.match(/coin\s+detected:\s*([\d.]+)g\s*->\s*((?:PHP|₱)\s*(?:5|10))\s*accepted/i);
+  const coinAcceptedMatch = raw.match(/coin\s+detected:\s*([\d.]+)g\s*->\s*((?:PHP|₱)\s*(?:5|10))(?:\s*accepted)?/i);
   if (coinAcceptedMatch) {
     const product = formatProductLabel(coinAcceptedMatch[2]);
+    const price = formatProductPrice(coinAcceptedMatch[2]);
     return {
       event: "Coin Detected",
       product,
@@ -475,7 +578,7 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("Coin Accepted"), line2: lcdPad(` ${coinAcceptedMatch[1]}g`), theme: "info" },
+      lcdState: { line1: lcdPad("Coin Detected"), line2: lcdPad(`${price ?? "coin"} ${coinAcceptedMatch[1]}g`), theme: "info" },
     };
   }
 
@@ -485,12 +588,12 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
     return {
       event: "Invalid Coin",
       product: null,
-      paymentStatus: null,
+      paymentStatus: "Insufficient",
       weight: `${coinInvalidMatch[1]}g`,
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(` ${coinInvalidMatch[1]}g`), theme: "error" },
+      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" },
     };
   }
 
@@ -499,34 +602,20 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
   if (insertedMatch) {
     return {
       event: "Inserted Balance",
-      product: null,
-      paymentStatus: null,
+      product: formatProductLabel(`PHP${insertedMatch[1]}`),
+      paymentStatus: "Pending",
       weight: null,
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("Balance Updated"), line2: lcdPad(` PHP${insertedMatch[1]} inserted`), theme: "info" },
+      lcdState: { line1: lcdPad("Inserted Balance"), line2: lcdPad(` PHP${insertedMatch[1]}`), theme: "payment" },
     };
   }
 
   // "Remaining: PHP5"
   const remainingMatch = raw.match(/^remaining:\s*(?:php|₱)\s*(\d+)$/i);
   if (remainingMatch) {
-    const remaining = Number(remainingMatch[1]);
-    return {
-      event: "Remaining Balance",
-      product: null,
-      paymentStatus: null,
-      weight: null,
-      rawLine: raw,
-      isLogEntry: true,
-      isPirEntry: false,
-      lcdState: {
-        line1: lcdPad("Remaining"),
-        line2: lcdPad(remaining > 0 ? ` PHP${remaining} to pay` : " Paid in full"),
-        theme: remaining > 0 ? "payment" : "ok",
-      },
-    };
+    return null;
   }
 
   // "Dispensing Product..."
@@ -562,14 +651,14 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
   const coinsFailMatch = raw.match(/coins:\s*([\d.]+)g\s*-\s*insufficient/i);
   if (coinsFailMatch) {
     return {
-      event: "Payment Incomplete",
+      event: "Invalid Coin",
       product: null,
       paymentStatus: "Insufficient",
       weight: `${coinsFailMatch[1]}g`,
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("Insufficient!"), line2: lcdPad(` ${coinsFailMatch[1]}g - Add more`), theme: "error" },
+      lcdState: { line1: lcdPad("Invalid Coin"), line2: lcdPad(" Insufficient"), theme: "error" },
     };
   }
 

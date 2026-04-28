@@ -1,63 +1,99 @@
-1. these are the updated but the payment status on product two is null i remember seeing the hardware said payment success so it should be in dashboard says Payment OK - verified 
-
-Live Transaction Log
-2026-04-28 09:48	Customer Left	—	—	—	—
-2026-04-28 09:48	Add More Coins	—	Insufficient	—	—
-2026-04-28 09:48	Product Removed	Product Two (PHP10)	—	—	—
-
-2. also in the insuffient in the logs did not add total in success rate
-3.the revenue in the dashboard is fixed
-4. when its insufficient the succes rate is fail the toatl cuccess rate decrease when the payment status is payment ok - verified the succes rate total increase 
-5. if invalid and insufficient coin treat it as fail in success rate.
-6.fix the clear logs in dashboard. when user click it all logs including pir entries are back to zero to store a new data again.
-7. still there are some wrong logic sending in the dashboard can you do a throughly debug and fix the proper logic as a senior developer. make sure to code a clean code
-8. final follow and focus on this logic
-
-#### hardware                                          
-honest pay ready
-no product - P1: 200g =P5                                    
-insert coin - COIN : 5PESOS
-waiting payment - PAYMENT SUCCESS
-----
-no product - P2: 400g =P10
-insert coin - COIN : 10PESOS
-waiting payment - PAYMENT SUCCESS
-----
-no product - P1: 200g =P5
-insert coin - COIN : 10PESOS
-waiting payment - PAYMENT INVALID
-----
-no product - P2: 400g =P10
-insert coin - COIN : 5PESOS
-waiting payment - PAYMENT INVALID
-----
-no product - P1: 200g =P5
-insert coin - (user did not insert coin)
-waiting payment - PAYMENT INVALID
-----
-no product - P2: 400g =P10
-insert coin - (user did not insert coin)
-waiting payment - PAYMENT INVALID
-
-## DASHBOARD
-Event: Product Removed Product: Product One (PHP5)
-Event: Inserted Balance
-Event Payment OK   payment status: Verified coin value: PHP5 weight: 7.3g
-----
-Event: Product Removed Product: Product two (PHP10)
-Event: Inserted Balance
-Event Payment OK   payment status: Verified coin value: PHP10 weight: g
----
-Event: Product Removed Product: Product One (PHP5)
-Event: Inserted Balance
-Event: invalid coin  payment status: Insufficient value: PHP5 weight: 7.3g
----
-Event: Product Removed Product: Product two (PHP10)
-Event: Inserted Balance
-Event: invalid coin  payment status: Insufficient value: PHP10 weight: g
-----
-Event: Product Removed Product: Product one (PHP5)
-Event: invalid coin  payment status: Insufficient value: PHP5 weight: g
-----
-Event: Product Removed Product: Product two (PHP10)
-Event: invalid coin  payment status: Insufficient value: PHP10 weight: g
+/**
+ * SYSTEM CONTRACT: HARDWARE ↔ DASHBOARD SYNC + SIMPLIFIED LOGIC
+ *
+ * This project connects Arduino hardware to a dashboard.
+ * All logic must remain consistent across:
+ * Arduino → Node.js → API → Dashboard UI
+ *
+ * =========================================
+ * CORE RULE: SINGLE SOURCE OF TRUTH
+ * =========================================
+ * Hardware messages define the truth.
+ * Dashboard must ONLY reflect hardware state.
+ * Do not invent or duplicate logic in the UI.
+ *
+ * =========================================
+ * STATE MACHINE (LIMIT LOGIC)
+ * =========================================
+ * The entire dashboard must only use 4 states:
+ *
+ * 1. IDLE
+ *    → "HonestPay Ready"
+ *
+ * 2. WAITING (product selected)
+ *    Trigger: product removed
+ *    → "Product Removed → Product One (PHP5)"
+ *    → "Product Removed → Product Two (PHP10)"
+ *    → "Inserted Balance"
+ *
+ * 3. VALIDATING (coin detected)
+ *    → "Coin Detected: <weight>g → PHP<value>"
+ *
+ * 4. RESULT
+ *
+ *    SUCCESS:
+ *      → "Payment OK"
+ *      → "Dispensing Product..."
+ *
+ *    INVALID:
+ *      → "Invalid Coin"
+ *      → "payment status: Insufficient"
+ *
+ *    NO COIN:
+ *      → "Invalid Coin"
+ *      → "payment status: No coin detected"
+ *
+ * =========================================
+ * HARDWARE → DASHBOARD MAPPING
+ * =========================================
+ *
+ * P1 → Product One → PHP5
+ * P2 → Product Two → PHP10
+ *
+ * PAYMENT SUCCESS → "Payment OK"
+ * PAYMENT INVALID → "Invalid Coin"
+ *
+ * =========================================
+ * VALIDATION RULES
+ * =========================================
+ *
+ * Product P1 requires PHP5
+ * Product P2 requires PHP10
+ *
+ * IF coin matches expected value:
+ *   → SUCCESS
+ *
+ * IF coin value is wrong:
+ *   → INVALID (Insufficient)
+ *
+ * IF no coin inserted:
+ *   → INVALID (No coin detected)
+ *
+ * =========================================
+ * UI RULES (VERY IMPORTANT)
+ * =========================================
+ *
+ * 1. Only ONE state can be active at a time
+ * 2. Do NOT show multiple conflicting messages
+ * 3. Remove unnecessary UI messages like:
+ *    - "Remaining"
+ *    - duplicate "Inserted Balance"
+ *    - mixed success + invalid at same time
+ *
+ * 4. Convert UI into a SINGLE EVENT LOG:
+ *
+ * Example:
+ * [1] Product Removed → Product One (PHP5)
+ * [2] Coin Detected → PHP10
+ * [3] Invalid Coin
+ *
+ * =========================================
+ * INSTRUCTION FOR COPILOT
+ * =========================================
+ *
+ * Refactor the dashboard into a strict 4-state machine.
+ * Ensure all UI messages follow hardware logic exactly.
+ * Prevent duplicate, overlapping, or out-of-order events.
+ * Keep message wording consistent across all layers.
+ * If hardware changes, update dashboard logic accordingly.
+ */

@@ -7,15 +7,72 @@ const VERCEL_BASE_URL = (process.env.VERCEL_BASE_URL || process.argv[3] || "http
 const API_URL = `${VERCEL_BASE_URL}/api/transactions`;
 const DEDUPE_WINDOW_MS = Number(process.env.DEDUPE_WINDOW_MS || 2500);
 
+/** @typedef {"P1" | "P2"} ProductCode */
+/** @typedef {"SUCCESS" | "FAILED"} TransactionStatus */
+/** @typedef {"VALID" | "INVALID" | "INSUFFICIENT"} TransactionReason */
+
+/**
+ * @typedef {{
+ *   product: ProductCode,
+ *   price: number,
+ *   inserted: number,
+ *   weight: number,
+ *   failureReason: Exclude<TransactionReason, "VALID"> | null,
+ *   pendingCoinValue: number | null,
+ * }} OngoingTransaction
+ */
+
+/**
+ * @typedef {{
+ *   timestamp: string,
+ *   product: ProductCode,
+ *   price: number,
+ *   inserted: number,
+ *   weight: number | null,
+ *   status: TransactionStatus,
+ *   reason: TransactionReason,
+ *   rawLine: string,
+ * }} TransactionPayload
+ */
+
+/**
+ * @typedef {{
+ *   kind: "transaction",
+ *   status: TransactionStatus,
+ *   product: ProductCode | null,
+ *   price: number | null,
+ *   inserted: number,
+ *   weight: number | null,
+ *   reason: TransactionReason,
+ *   rawLine: string,
+ * }} ParsedTransactionLine
+ */
+
+/**
+ * @typedef {{
+ *   kind: "event",
+ *   event: string,
+ *   product: string | null,
+ *   paymentStatus: string | null,
+ *   weight: string | null,
+ *   rawLine: string,
+ * }} ParsedEventLine
+ */
+
+/** @typedef {ParsedTransactionLine | ParsedEventLine} ParsedLine */
+
 let lastSentAt = 0;
 let lastPirSentAt = 0;
+/** @type {OngoingTransaction | null} */
 let ongoingTransaction = null;
 
+/** @param {unknown} value */
 function normalizeEvent(value) {
   if (typeof value !== "string") return "";
   return value.trim().toLowerCase();
 }
 
+/** @param {unknown} token */
 function formatProductLabel(token) {
   const value = String(token || "").trim();
   if (!value) return null;
@@ -35,6 +92,9 @@ function formatProductLabel(token) {
   return value;
 }
 
+/** @param {unknown} rawProduct
+ *  @returns {ProductCode | null}
+ */
 function formatTransactionProduct(rawProduct) {
   const value = String(rawProduct || "").trim();
   if (!value) return null;
@@ -49,6 +109,7 @@ function formatTransactionProduct(rawProduct) {
   return null;
 }
 
+/** @param {unknown} rawProduct */
 function inferPriceFromProduct(rawProduct) {
   const product = formatTransactionProduct(rawProduct) || String(rawProduct || "").trim().toUpperCase();
   if (product === "P1" || product.includes("PHP5") || product.includes("PRODUCT ONE")) return 5;
@@ -56,6 +117,7 @@ function inferPriceFromProduct(rawProduct) {
   return null;
 }
 
+/** @param {unknown} rawWeight */
 function parseWeightValue(rawWeight) {
   if (typeof rawWeight === "number") return Number.isFinite(rawWeight) ? rawWeight : 0;
   if (typeof rawWeight !== "string") return 0;
@@ -63,6 +125,29 @@ function parseWeightValue(rawWeight) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/**
+ * @param {string} rawLine
+ * @param {string | null} product
+ * @returns {number | null}
+ */
+function parseInsertedAmount(rawLine, product) {
+  const insertedMatch = rawLine.match(/inserted:\s*php(\d+)/i);
+  if (insertedMatch) {
+    return Number.parseInt(insertedMatch[1], 10);
+  }
+
+  const contractInsertMatch = rawLine.match(/coin\s*:\s*(5|10)\s*pesos/i);
+  if (contractInsertMatch) {
+    return Number.parseInt(contractInsertMatch[1], 10);
+  }
+
+  return inferPriceFromProduct(product);
+}
+
+/**
+ * @param {{ status: TransactionStatus, reason: TransactionReason, rawLine: string }} param0
+ * @returns {TransactionPayload | null}
+ */
 function buildTransactionPayload({ status, reason, rawLine }) {
   if (!ongoingTransaction || !ongoingTransaction.product || !Number.isFinite(ongoingTransaction.price)) {
     return null;
@@ -87,21 +172,28 @@ function buildTransactionPayload({ status, reason, rawLine }) {
   return payload;
 }
 
+/**
+ * @param {ParsedEventLine | null | undefined} parsed
+ * @returns {TransactionPayload | null}
+ */
 function consumeEventTransaction(parsed) {
-  const eventName = normalizeEvent(parsed?.event);
+  if (!parsed) return null;
+
+  const eventName = normalizeEvent(parsed.event);
   if (!eventName) return null;
 
   if ((eventName.includes("product removed") || eventName.startsWith("pay ")) && parsed.product) {
     const product = formatTransactionProduct(parsed.product);
     const price = inferPriceFromProduct(parsed.product);
 
-    if (product && Number.isFinite(price)) {
+    if (product && price !== null) {
       ongoingTransaction = {
         product,
         price,
         inserted: 0,
         weight: 0,
         failureReason: null,
+        pendingCoinValue: null,
       };
     }
     return null;
@@ -109,17 +201,42 @@ function consumeEventTransaction(parsed) {
 
   if (!ongoingTransaction) return null;
 
-  if (eventName === "coin detected") {
+  if (eventName === "coin detected" && parsed.product) {
     const coinValue = inferPriceFromProduct(parsed.product);
-    if (Number.isFinite(coinValue)) {
-      ongoingTransaction.inserted += coinValue;
+    if (coinValue !== null) {
+      if (ongoingTransaction.pendingCoinValue !== coinValue) {
+        ongoingTransaction.inserted += coinValue;
+      }
       ongoingTransaction.weight += parseWeightValue(parsed.weight);
+      ongoingTransaction.pendingCoinValue = ongoingTransaction.pendingCoinValue === coinValue ? null : coinValue;
+    }
+    return null;
+  }
+
+  if (eventName === "inserted balance") {
+    const insertedAmount = parseInsertedAmount(parsed.rawLine, parsed.product);
+    if (insertedAmount !== null) {
+      const isDuplicateOfDetectedCoin = ongoingTransaction.pendingCoinValue === insertedAmount;
+      if (!isDuplicateOfDetectedCoin) {
+        ongoingTransaction.inserted += insertedAmount;
+      }
+      ongoingTransaction.pendingCoinValue = isDuplicateOfDetectedCoin ? null : insertedAmount;
     }
     return null;
   }
 
   if (eventName === "invalid coin") {
-    ongoingTransaction.failureReason = "INVALID";
+    const paymentStatus = normalizeEvent(parsed.paymentStatus);
+    ongoingTransaction.failureReason = paymentStatus === "no coin detected" ? "INVALID" : "INSUFFICIENT";
+
+    if (paymentStatus === "no coin detected" || paymentStatus === "insufficient" || /payment invalid|payment incomplete|add more coins/i.test(parsed.rawLine)) {
+      return buildTransactionPayload({
+        status: "FAILED",
+        reason: ongoingTransaction.failureReason,
+        rawLine: parsed.rawLine,
+      });
+    }
+
     return null;
   }
 
@@ -150,6 +267,9 @@ function consumeEventTransaction(parsed) {
   return null;
 }
 
+/** @param {unknown} rawLine
+ *  @returns {ParsedTransactionLine | null}
+ */
 function parseTransactionLine(rawLine) {
   const raw = String(rawLine || "").trim();
   if (!raw) return null;
@@ -186,6 +306,9 @@ function parseTransactionLine(rawLine) {
   return null;
 }
 
+/** @param {unknown} rawLine
+ *  @returns {ParsedLine | null}
+ */
 function parseSmartPayLine(rawLine) {
   const raw = String(rawLine || "").trim();
   if (!raw) return null;
@@ -203,7 +326,7 @@ function parseSmartPayLine(rawLine) {
 
       return {
         kind: "event",
-        event: parsed.event,
+        event: parsed.event.trim(),
         product: typeof parsed.product === "string" ? parsed.product : null,
         paymentStatus: typeof parsed.paymentStatus === "string" ? parsed.paymentStatus : null,
         weight: typeof parsed.weight === "string" ? parsed.weight : null,
@@ -225,6 +348,53 @@ function parseSmartPayLine(rawLine) {
 
   if (/^customer entered\b/i.test(raw)) {
     return { kind: "event", event: "Customer Entered", product: null, paymentStatus: null, weight: null, rawLine: raw };
+  }
+
+  const contractProductRemovedMatch = raw.match(/^no\s+product\s*-\s*(p[12])\s*:\s*([+-]?\d+(?:\.\d+)?)g\s*=\s*p(?:5|10)$/i);
+  if (contractProductRemovedMatch) {
+    return {
+      kind: "event",
+      event: "Product Removed",
+      product: formatProductLabel(contractProductRemovedMatch[1]),
+      paymentStatus: "Pending",
+      weight: `${Number(contractProductRemovedMatch[2]).toFixed(2)}g`,
+      rawLine: raw,
+    };
+  }
+
+  const contractInsertCoinMatch = raw.match(/^insert\s+coin\s*-\s*coin\s*:\s*(5|10)\s*pesos$/i);
+  if (contractInsertCoinMatch) {
+    return {
+      kind: "event",
+      event: "Inserted Balance",
+      product: contractInsertCoinMatch[1] === "5" ? "Product One (PHP5)" : "Product Two (PHP10)",
+      paymentStatus: "Pending",
+      weight: null,
+      rawLine: raw,
+    };
+  }
+
+  if (/^insert\s+coin\s*-\s*\(no\s+coin\)$/i.test(raw)) {
+    return {
+      kind: "event",
+      event: "Invalid Coin",
+      product: null,
+      paymentStatus: "No coin detected",
+      weight: null,
+      rawLine: raw,
+    };
+  }
+
+  const paymentStatusMatch = raw.match(/^payment\s+status:\s*(insufficient|no\s+coin\s+detected)$/i);
+  if (paymentStatusMatch) {
+    return {
+      kind: "event",
+      event: "Invalid Coin",
+      product: null,
+      paymentStatus: paymentStatusMatch[1].toLowerCase() === "insufficient" ? "Insufficient" : "No coin detected",
+      weight: null,
+      rawLine: raw,
+    };
   }
 
   const productRemovedMatch = raw.match(/^product removed\.?\s*pay\s*(.+)$/i);
@@ -253,7 +423,7 @@ function parseSmartPayLine(rawLine) {
     };
   }
 
-  const coinDetectedMatch = raw.match(/^coin detected:\s*([\d.]+)g\s*->\s*php(5|10)\s*accepted$/i);
+  const coinDetectedMatch = raw.match(/^coin detected:\s*([\d.]+)g\s*->\s*php(5|10)(?:\s*accepted)?$/i);
   if (coinDetectedMatch) {
     return {
       kind: "event",
@@ -279,14 +449,7 @@ function parseSmartPayLine(rawLine) {
 
   const remainingMatch = raw.match(/^remaining:\s*php(\d+)$/i);
   if (remainingMatch) {
-    return {
-      kind: "event",
-      event: "Remaining Balance",
-      product: null,
-      paymentStatus: null,
-      weight: null,
-      rawLine: raw,
-    };
+    return null;
   }
 
   if (/^dispensing product\.?$/i.test(raw)) {
@@ -297,12 +460,20 @@ function parseSmartPayLine(rawLine) {
     return { kind: "event", event: "Payment OK", product: null, paymentStatus: "Verified", weight: null, rawLine: raw };
   }
 
+  if (/^waiting\s+payment\s*-\s*payment\s+success$/i.test(raw)) {
+    return { kind: "event", event: "Payment OK", product: null, paymentStatus: "Verified", weight: null, rawLine: raw };
+  }
+
+  if (/^(?:waiting\s+payment\s*-\s*)?payment\s+invalid$/i.test(raw)) {
+    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+  }
+
   if (/^payment incomplete$/i.test(raw)) {
-    return { kind: "event", event: "Payment Incomplete", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
   }
 
   if (/^add more coins$/i.test(raw)) {
-    return { kind: "event", event: "Add More Coins", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
   }
 
   if (/^customer left$/i.test(raw)) {
@@ -316,6 +487,7 @@ function parseSmartPayLine(rawLine) {
   return null;
 }
 
+/** @param {TransactionPayload} payload */
 async function postToVercel(payload) {
   const res = await fetch(API_URL, {
     method: "POST",
@@ -331,6 +503,7 @@ async function postToVercel(payload) {
   return text;
 }
 
+/** @param {number} nowMs */
 function shouldDropDuplicate(nowMs) {
   if (nowMs - lastSentAt < DEDUPE_WINDOW_MS) {
     return true;
@@ -339,14 +512,17 @@ function shouldDropDuplicate(nowMs) {
   return false;
 }
 
+/** @param {string} eventName */
 function isPirEventName(eventName) {
   return eventName === "entry" || eventName === "customer entered" || eventName === "customer_entered";
 }
 
+/** @param {string} eventName */
 function isEntryOnlyPirEvent(eventName) {
   return eventName === "entry";
 }
 
+/** @param {number} nowMs */
 function shouldDropPirDuplicate(nowMs) {
   if (nowMs - lastPirSentAt < DEDUPE_WINDOW_MS) {
     return true;
@@ -384,21 +560,27 @@ function start() {
     }
 
     if (parsed.kind === "transaction") {
+      const transaction = parsed;
       const now = Date.now();
       if (shouldDropDuplicate(now)) {
         console.warn("[SKIP] Duplicate transaction within dedupe window");
         return;
       }
 
+      if (!transaction.product || transaction.price === null) {
+        console.warn("[SKIP] Transaction line missing normalized product or price");
+        return;
+      }
+
       const payload = {
         timestamp: new Date().toISOString(),
-        product: parsed.product,
-        price: parsed.price,
-        inserted: parsed.inserted,
-        weight: parsed.weight,
-        status: parsed.status,
-        reason: parsed.reason,
-        rawLine: parsed.rawLine,
+        product: transaction.product,
+        price: transaction.price,
+        inserted: transaction.inserted,
+        weight: transaction.weight,
+        status: transaction.status,
+        reason: transaction.reason,
+        rawLine: transaction.rawLine,
       };
 
       try {
@@ -407,6 +589,10 @@ function start() {
       } catch (err) {
         console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
       }
+      return;
+    }
+
+    if (parsed.kind !== "event") {
       return;
     }
 
@@ -423,12 +609,12 @@ function start() {
     }
 
     const now = Date.now();
-    if (parsed.kind === "event" && isPirEventName(eventName)) {
+    if (isPirEventName(eventName)) {
       if (shouldDropPirDuplicate(now)) {
         console.warn(`[SKIP] Duplicate PIR event within dedupe window: ${eventName}`);
         return;
       }
-    } else if (parsed.kind === "transaction" && shouldDropDuplicate(now)) {
+    } else if (shouldDropDuplicate(now)) {
       console.warn(`[SKIP] Duplicate event within dedupe window: ${eventName}`);
       return;
     }

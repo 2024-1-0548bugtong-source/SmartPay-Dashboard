@@ -1,84 +1,78 @@
 import { useReducer, useEffect, useRef, useCallback } from "react";
 import { lcdPad, type LcdState } from "./serial";
 
-// ── State definitions ────────────────────────────────────────────────────
-
-export type SmState = "READY" | "ENTERED" | "PAY" | "OK" | "ERROR";
+export type SmState = "IDLE" | "WAITING" | "VALIDATING" | "RESULT";
+export type ResultKind = "SUCCESS" | "INVALID" | "NO_COIN";
 
 export interface SmConfig {
   id: SmState;
   line1: (ctx: SmContext) => string;
   line2: (ctx: SmContext, countdown?: number) => string;
-  theme: LcdState["theme"];
-  /** ms until auto-transition. 0 = no auto-reset */
+  theme: LcdState["theme"] | ((ctx: SmContext) => LcdState["theme"]);
   autoResetMs: number;
-  /** Which state to go to after autoReset */
   autoResetTarget: SmState;
-  /** ms of idle before resetting to READY. 0 = use global default */
   idleMs: number;
 }
 
 export interface SmContext {
   product: string | null;
   weight: string | null;
+  result: ResultKind | null;
 }
 
 export const SM_STATES: Record<SmState, SmConfig> = {
-  READY: {
-    id: "READY",
-    line1: () => lcdPad("** SmartPay **"),
-    line2: () => lcdPad("    Ready \u2665"),
+  IDLE: {
+    id: "IDLE",
+    line1: () => lcdPad("** HonestPay **"),
+    line2: () => lcdPad("    Ready"),
     theme: "ready",
     autoResetMs: 0,
-    autoResetTarget: "READY",
+    autoResetTarget: "IDLE",
     idleMs: 0,
   },
-  ENTERED: {
-    id: "ENTERED",
-    line1: () => lcdPad("Customer Entered"),
-    line2: () => lcdPad("  Please wait..."),
-    theme: "entry",
-    autoResetMs: 0,
-    autoResetTarget: "READY",
-    idleMs: 30_000,
-  },
-  PAY: {
-    id: "PAY",
-    line1: (ctx) => lcdPad(`Insert: ${ctx.product ?? "coins"}`),
-    line2: (ctx) => lcdPad(`  Pay ${ctx.product ?? "PHP?"}`),
+  WAITING: {
+    id: "WAITING",
+    line1: () => lcdPad("Product Removed"),
+    line2: (ctx) => lcdPad(ctx.product ? `  ${ctx.product.replace(/^.*\((PHP\d+)\).*$/i, "$1")}` : "Inserted Balance"),
     theme: "payment",
     autoResetMs: 0,
-    autoResetTarget: "READY",
+    autoResetTarget: "IDLE",
     idleMs: 30_000,
   },
-  OK: {
-    id: "OK",
-    line1: () => lcdPad("Payment OK! \u2713"),
-    line2: (_ctx, cd) => lcdPad(cd !== undefined ? `  Thank you! ${cd}s` : "  Thank you! :)"),
-    theme: "ok",
-    autoResetMs: 3_000,
-    autoResetTarget: "READY",
-    idleMs: 0,
+  VALIDATING: {
+    id: "VALIDATING",
+    line1: () => lcdPad("Coin Detected"),
+    line2: (ctx) => lcdPad(ctx.product ? `  ${ctx.product.replace(/^.*\((PHP\d+)\).*$/i, "$1")}` : (ctx.weight ? `  ${ctx.weight}` : "  Validating")),
+    theme: "info",
+    autoResetMs: 0,
+    autoResetTarget: "IDLE",
+    idleMs: 30_000,
   },
-  ERROR: {
-    id: "ERROR",
-    line1: () => lcdPad("Insufficient! \u2717"),
-    line2: (_ctx, cd) => lcdPad(cd !== undefined ? `Add coins... ${cd}s` : "Add More Coins"),
-    theme: "error",
-    autoResetMs: 5_000,
-    autoResetTarget: "PAY",
+  RESULT: {
+    id: "RESULT",
+    line1: (ctx) => lcdPad(ctx.result === "SUCCESS" ? "Payment OK" : "Invalid Coin"),
+    line2: (ctx, countdown) => {
+      if (ctx.result === "SUCCESS") {
+        return lcdPad(countdown !== undefined ? `Dispensing ${countdown}s` : "Dispensing...");
+      }
+      if (ctx.result === "NO_COIN") {
+        return lcdPad(" No coin detect");
+      }
+      return lcdPad(" Insufficient");
+    },
+    theme: (ctx) => (ctx.result === "SUCCESS" ? "ok" : "error"),
+    autoResetMs: 4_000,
+    autoResetTarget: "IDLE",
     idleMs: 0,
   },
 };
 
 const GLOBAL_IDLE_MS = 30_000;
 
-// ── Reducer ──────────────────────────────────────────────────────────────
-
 interface SmStoreState {
   state: SmState;
   ctx: SmContext;
-  countdown: number | null; // seconds shown in LCD
+  countdown: number | null;
   lastActivity: number;
 }
 
@@ -92,9 +86,13 @@ function reducer(store: SmStoreState, action: SmAction): SmStoreState {
     case "TRANSITION": {
       const cfg = SM_STATES[action.to];
       const countdown = cfg.autoResetMs > 0 ? Math.ceil(cfg.autoResetMs / 1000) : null;
+      const baseCtx = action.to === "IDLE"
+        ? { product: null, weight: null, result: null }
+        : store.ctx;
+
       return {
         state: action.to,
-        ctx: { ...store.ctx, ...(action.ctx ?? {}) },
+        ctx: { ...baseCtx, ...(action.ctx ?? {}) },
         countdown,
         lastActivity: Date.now(),
       };
@@ -104,27 +102,24 @@ function reducer(store: SmStoreState, action: SmAction): SmStoreState {
       return { ...store, countdown: store.countdown - 1 };
     }
     case "IDLE_RESET":
-      return { ...reducer(store, { type: "TRANSITION", to: "READY" }), lastActivity: Date.now() };
+      return { ...reducer(store, { type: "TRANSITION", to: "IDLE" }), lastActivity: Date.now() };
     default:
       return store;
   }
 }
-
-// ── Hook ─────────────────────────────────────────────────────────────────
 
 export interface UseStateMachineReturn {
   state: SmState;
   ctx: SmContext;
   lcdState: LcdState;
   transition: (to: SmState, ctx?: Partial<SmContext>) => void;
-  /** Call on any user/serial activity to reset idle timer */
   ping: () => void;
 }
 
 export function useStateMachine(): UseStateMachineReturn {
   const [store, dispatch] = useReducer(reducer, {
-    state: "READY",
-    ctx: { product: null, weight: null },
+    state: "IDLE",
+    ctx: { product: null, weight: null, result: null },
     countdown: null,
     lastActivity: Date.now(),
   });
@@ -139,25 +134,21 @@ export function useStateMachine(): UseStateMachineReturn {
     if (idleTimerRef.current) { clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
   };
 
-  // Whenever state changes, set up timers
   useEffect(() => {
     clearTimers();
     const cfg = SM_STATES[store.state];
 
-    // Auto-reset timer (OK → READY after 3s, ERROR → PAY after 5s)
     if (cfg.autoResetMs > 0) {
       autoTimerRef.current = setTimeout(() => {
         dispatch({ type: "TRANSITION", to: cfg.autoResetTarget });
       }, cfg.autoResetMs);
 
-      // Countdown tick every second
       tickTimerRef.current = setInterval(() => {
         dispatch({ type: "TICK" });
       }, 1_000);
     }
 
-    // Idle timeout
-    const idleMs = cfg.idleMs > 0 ? cfg.idleMs : store.state === "READY" ? 0 : GLOBAL_IDLE_MS;
+    const idleMs = cfg.idleMs > 0 ? cfg.idleMs : store.state === "IDLE" ? 0 : GLOBAL_IDLE_MS;
     if (idleMs > 0) {
       idleTimerRef.current = setTimeout(() => {
         dispatch({ type: "IDLE_RESET" });
@@ -172,58 +163,43 @@ export function useStateMachine(): UseStateMachineReturn {
   }, []);
 
   const ping = useCallback(() => {
-    // Reset idle timer without changing state — easiest: re-dispatch current state
     dispatch({ type: "TRANSITION", to: store.state });
   }, [store.state]);
 
-  // Build LCD state from current state + countdown
   const cfg = SM_STATES[store.state];
   const lcdState: LcdState = {
     line1: cfg.line1(store.ctx),
     line2: cfg.line2(store.ctx, store.countdown ?? undefined),
-    theme: cfg.theme,
+    theme: typeof cfg.theme === "function" ? cfg.theme(store.ctx) : cfg.theme,
   };
 
   return { state: store.state, ctx: store.ctx, lcdState, transition, ping };
 }
 
-// ── Serial → State mapping ───────────────────────────────────────────────
-
 export type SerialTrigger =
-  | "READY"
-  | "ENTRY"
-  | "CUSTOMER_ENTERED"
-  | "PRODUCT_REMOVED"
-  | "PAY_PROMPT"
-  | "INSERT_COINS"
-  | "SENSOR_RESETTING"
-  | "PLACE_ITEM"
-  | "COINS_OK"
-  | "COINS_FAIL"
-  | "CUSTOMER_LEFT"
-  | "ADD_MORE_COINS"
-  | "PAYMENT_OK_EXPLICIT"
+  | "IDLE"
+  | "WAITING"
+  | "VALIDATING"
+  | "RESULT_SUCCESS"
+  | "RESULT_INVALID"
+  | "RESULT_NO_COIN"
   | null;
 
-/** Map a parsed serial event name to a state machine trigger */
-export function eventToTrigger(event: string): SerialTrigger {
+export function eventToTrigger(event: string, paymentStatus?: string | null): SerialTrigger {
   const ev = event.toLowerCase();
-  if (ev === "smartpay ready" || ev === "honestpay ready") return "READY";
-  if (ev === "place item") return "PLACE_ITEM";
-  if (ev === "entry") return "ENTRY";
-  if (ev === "customer entered") return "CUSTOMER_ENTERED";
-  if (ev.includes("product removed")) return "PRODUCT_REMOVED";
-  if (ev.startsWith("pay ")) return "PAY_PROMPT";
-  if (ev === "insert coins") return "INSERT_COINS";
-  if (ev === "sensor resetting") return "SENSOR_RESETTING";
-  if (ev === "payment ok") return "COINS_OK";
-  if (ev === "payment incomplete") return "COINS_FAIL";
-  if (ev === "customer left") return "READY";
-  if (ev === "add more coins") return "ADD_MORE_COINS";
+  const status = paymentStatus?.toLowerCase() ?? null;
+
+  if (ev === "smartpay ready" || ev === "honestpay ready" || ev === "place item" || ev === "customer left") return "IDLE";
+  if (ev.includes("product removed") || ev.startsWith("pay ") || ev === "insert coins" || ev === "inserted balance") return "WAITING";
+  if (ev === "coin detected") return "VALIDATING";
+  if (ev === "payment ok" || ev === "dispensing product" || ev === "sensor resetting") return "RESULT_SUCCESS";
+  if (ev === "invalid coin" || ev === "payment incomplete" || ev === "add more coins") {
+    return status === "no coin detected" ? "RESULT_NO_COIN" : "RESULT_INVALID";
+  }
+
   return null;
 }
 
-/** Apply a trigger to the state machine, return true if it produced a transition */
 export function applyTrigger(
   trigger: SerialTrigger,
   currentState: SmState,
@@ -233,30 +209,23 @@ export function applyTrigger(
   if (!trigger) return false;
 
   switch (trigger) {
-    case "READY":
-    case "PLACE_ITEM":
-      transition("READY");
+    case "IDLE":
+      transition("IDLE", { product: null, weight: null, result: null });
       return true;
-    case "ENTRY":
-    case "CUSTOMER_ENTERED":
-      transition("ENTERED");
+    case "WAITING":
+      transition("WAITING", { ...ctx, result: null });
       return true;
-    case "PRODUCT_REMOVED":
-    case "PAY_PROMPT":
-    case "INSERT_COINS":
-      transition("PAY", ctx);
+    case "VALIDATING":
+      transition("VALIDATING", { ...ctx, result: null });
       return true;
-    case "COINS_OK":
-    case "PAYMENT_OK_EXPLICIT":
-    case "SENSOR_RESETTING":
-      transition("OK", ctx);
+    case "RESULT_SUCCESS":
+      transition("RESULT", { ...ctx, result: "SUCCESS" });
       return true;
-    case "COINS_FAIL":
-    case "ADD_MORE_COINS":
-      transition("ERROR");
+    case "RESULT_INVALID":
+      transition("RESULT", { ...ctx, result: "INVALID" });
       return true;
-    case "CUSTOMER_LEFT":
-      transition("READY");
+    case "RESULT_NO_COIN":
+      transition("RESULT", { ...ctx, result: "NO_COIN" });
       return true;
     default:
       return false;

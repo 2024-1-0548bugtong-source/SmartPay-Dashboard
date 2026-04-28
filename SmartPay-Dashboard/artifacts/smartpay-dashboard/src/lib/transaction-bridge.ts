@@ -16,6 +16,7 @@ export interface TransactionDraft {
   inserted: number;
   weight: number;
   failureReason: "INSUFFICIENT" | "INVALID" | null;
+  pendingCoinValue: number | null;
 }
 
 const PIR_DEDUPE_WINDOW_MS = 4000;
@@ -29,6 +30,20 @@ function parseWeight(weight: string | null): number {
   if (!weight) return 0;
   const parsed = parseFloat(weight);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseInsertedAmount(rawLine: string | null, product: string | null): number | null {
+  const insertedMatch = rawLine?.match(/inserted:\s*php(\d+)/i);
+  if (insertedMatch) {
+    return parseInt(insertedMatch[1], 10);
+  }
+
+  const contractInsertMatch = rawLine?.match(/coin\s*:\s*(5|10)\s*pesos/i);
+  if (contractInsertMatch) {
+    return parseInt(contractInsertMatch[1], 10);
+  }
+
+  return parsePrice(product);
 }
 
 function buildTransactionId(row: Omit<TransactionRow, "id" | "rawLine">): string {
@@ -67,7 +82,7 @@ function finalizeDraft(
 
 export function applyRawEventToTransaction(
   draft: TransactionDraft | null,
-  row: Pick<RawTransactionEvent, "timestamp" | "event" | "product" | "weight">
+  row: Pick<RawTransactionEvent, "timestamp" | "event" | "product" | "paymentStatus" | "weight" | "rawLine">
 ): { draft: TransactionDraft | null; completed: TransactionRow | null } {
   const evLower = row.event?.toLowerCase();
   if (!evLower) {
@@ -85,6 +100,7 @@ export function applyRawEventToTransaction(
         inserted: 0,
         weight: 0,
         failureReason: null,
+        pendingCoinValue: null,
       };
     }
     return { draft: nextDraft, completed: null };
@@ -99,6 +115,7 @@ export function applyRawEventToTransaction(
         inserted: 0,
         weight: 0,
         failureReason: null,
+        pendingCoinValue: null,
       };
     }
     return { draft: nextDraft, completed: null };
@@ -113,16 +130,44 @@ export function applyRawEventToTransaction(
     if (coinValue !== null) {
       nextDraft = {
         ...nextDraft,
-        inserted: nextDraft.inserted + coinValue,
+        inserted: nextDraft.pendingCoinValue === coinValue ? nextDraft.inserted : nextDraft.inserted + coinValue,
         weight: nextDraft.weight + parseWeight(row.weight),
+        pendingCoinValue: nextDraft.pendingCoinValue === coinValue ? null : coinValue,
+      };
+    }
+    return { draft: nextDraft, completed: null };
+  }
+
+  if (evLower === "inserted balance") {
+    const insertedAmount = parseInsertedAmount(row.rawLine, row.product);
+    if (insertedAmount !== null) {
+      const isDuplicateOfDetectedCoin = nextDraft.pendingCoinValue === insertedAmount;
+      nextDraft = {
+        ...nextDraft,
+        inserted: isDuplicateOfDetectedCoin ? nextDraft.inserted : nextDraft.inserted + insertedAmount,
+        pendingCoinValue: isDuplicateOfDetectedCoin ? null : insertedAmount,
       };
     }
     return { draft: nextDraft, completed: null };
   }
 
   if (evLower === "invalid coin") {
+    const paymentStatus = row.paymentStatus?.toLowerCase();
+    const failureReason = paymentStatus === "no coin detected" ? "INVALID" : "INSUFFICIENT";
+    const isTerminalInvalid =
+      paymentStatus === "no coin detected" ||
+      paymentStatus === "insufficient" ||
+      /payment invalid|payment incomplete|add more coins/i.test(row.rawLine ?? "");
+
+    if (isTerminalInvalid) {
+      return {
+        draft: null,
+        completed: finalizeDraft(nextDraft, row.timestamp, "FAILED", failureReason),
+      };
+    }
+
     return {
-      draft: { ...nextDraft, failureReason: "INVALID" },
+      draft: { ...nextDraft, failureReason, pendingCoinValue: null },
       completed: null,
     };
   }
@@ -132,6 +177,7 @@ export function applyRawEventToTransaction(
       draft: {
         ...nextDraft,
         failureReason: nextDraft.failureReason ?? "INSUFFICIENT",
+        pendingCoinValue: null,
       },
       completed: null,
     };

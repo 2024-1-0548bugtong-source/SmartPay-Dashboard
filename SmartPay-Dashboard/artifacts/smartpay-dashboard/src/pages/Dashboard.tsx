@@ -51,19 +51,17 @@ const LCD_THEMES: Record<string, { bg: string; text: string; border: string; glo
 };
 
 const SM_STATE_LABEL: Record<SmState, string> = {
-  READY:   "HonestPay Ready",
-  ENTERED: "Customer Entered",
-  PAY:     "Awaiting Payment",
-  OK:      "Payment OK ✓",
-  ERROR:   "Insufficient ✗",
+  IDLE:       "HonestPay Ready",
+  WAITING:    "Waiting",
+  VALIDATING: "Validating",
+  RESULT:     "Result",
 };
 
 const SM_STATE_COLOR: Record<SmState, string> = {
-  READY:   "bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200",
-  ENTERED: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/60 dark:text-yellow-200",
-  PAY:     "bg-orange-100 text-orange-800 dark:bg-orange-900/60 dark:text-orange-200",
-  OK:      "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200",
-  ERROR:   "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200",
+  IDLE:       "bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200",
+  WAITING:    "bg-orange-100 text-orange-800 dark:bg-orange-900/60 dark:text-orange-200",
+  VALIDATING: "bg-slate-100 text-slate-800 dark:bg-slate-900/60 dark:text-slate-200",
+  RESULT:     "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200",
 };
 
 function LcdSimulator({ state, smState }: { state: LcdState; smState: SmState }) {
@@ -132,8 +130,8 @@ function LcdSimulator({ state, smState }: { state: LcdState; smState: SmState })
       <div className="flex items-center gap-3 mt-2.5 px-1">
         {[
           { label: "PWR", color: "#10B981", on: true },
-          { label: "RX",  color: theme.glow, on: smState !== "READY" },
-          { label: "TX",  color: theme.glow, on: smState === "OK" || smState === "ERROR" },
+          { label: "RX",  color: theme.glow, on: smState !== "IDLE" },
+          { label: "TX",  color: theme.glow, on: smState === "RESULT" },
         ].map(({ label, color, on }) => (
           <div key={label} className="flex items-center gap-1">
             <div className="w-2 h-2 rounded-full transition-all duration-300"
@@ -176,11 +174,10 @@ function LcdLine({ text, color }: { text: string; color: string }) {
 // ── State machine flow visual ─────────────────────────────────────────────
 
 const FLOW_STEPS: { id: SmState; icon: string; label: string; sub: string }[] = [
-  { id: "READY",   icon: "🏪", label: "Ready",    sub: "Waiting for customer" },
-  { id: "ENTERED", icon: "👤", label: "Entered",   sub: "PIR detected" },
-  { id: "PAY",     icon: "💰", label: "Pay",       sub: "Product removed" },
-  { id: "OK",      icon: "✅", label: "OK",        sub: "Auto-reset 3s" },
-  { id: "ERROR",   icon: "❌", label: "Add Coins", sub: "Retry in 5s" },
+  { id: "IDLE",       icon: "🏪", label: "Idle",       sub: "HonestPay Ready" },
+  { id: "WAITING",    icon: "📦", label: "Waiting",    sub: "Product removed" },
+  { id: "VALIDATING", icon: "🪙", label: "Validating", sub: "Coin detected" },
+  { id: "RESULT",     icon: "✅", label: "Result",     sub: "Success or invalid" },
 ];
 
 function FlowIndicator({ current }: { current: SmState }) {
@@ -220,31 +217,24 @@ function FlowIndicator({ current }: { current: SmState }) {
 const DEMO_SCRIPT = [
   { line: "HonestPay Ready",              delay: 800  },
   { line: "Entry: 201",                   delay: 1500 },
-  { line: "Customer Entered",             delay: 1000 },
-  { line: `Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`, delay: 2000 },
-  { line: `Pay ${PRODUCT_CATALOG.PHP5.label}`, delay: 1500 },
-  { line: "Coin Detected: 7.3g -> PHP5 ACCEPTED", delay: 900 },
-  { line: "Inserted: PHP5",               delay: 700 },
-  { line: "Remaining: PHP0",              delay: 700 },
+  { line: "no product - P1: 200g =P5",    delay: 1500 },
+  { line: "insert coin - COIN : 5PESOS",  delay: 700 },
+  { line: "Coin Detected: 7.3g -> PHP5",  delay: 900 },
+  { line: "Payment OK",                   delay: 900 },
   { line: "Dispensing Product...",        delay: 900 },
-  { line: "Payment OK",                   delay: 4000 }, // wait for 3s auto-reset
-  { line: "HonestPay Ready",              delay: 1000 },
+  { line: "HonestPay Ready",              delay: 2000 },
   { line: "Entry: 202",                   delay: 1500 },
-  { line: `Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`, delay: 1500 },
-  { line: `Pay ${PRODUCT_CATALOG.PHP10.label}`, delay: 1000 },
-  { line: "Coin Detected: 7.3g -> PHP5 ACCEPTED", delay: 900 },
-  { line: "Inserted: PHP5",               delay: 700 },
-  { line: "Remaining: PHP5",              delay: 700 },
-  { line: "Add More Coins",              delay: 6000 }, // wait for 5s retry
-  { line: "Coin Detected: 7.9g -> INVALID COIN", delay: 900 },
-  { line: "Inserted: PHP5",               delay: 700 },
-  { line: "Remaining: PHP5",              delay: 700 },
-  { line: "Add More Coins",              delay: 1500 },
-  { line: "Coin Detected: 8.8g -> PHP10 ACCEPTED", delay: 900 },
-  { line: "Inserted: PHP15",              delay: 700 },
-  { line: "Remaining: PHP0",              delay: 700 },
-  { line: "Dispensing Product...",        delay: 900 },
-  { line: "Payment OK",                   delay: 1200 },
+  { line: "no product - P2: 200g =P10",   delay: 1500 },
+  { line: "insert coin - COIN : 5PESOS",  delay: 700 },
+  { line: "Coin Detected: 7.3g -> PHP5",  delay: 900 },
+  { line: "PAYMENT INVALID",              delay: 900 },
+  { line: "payment status: Insufficient", delay: 1500 },
+  { line: "HonestPay Ready",              delay: 2000 },
+  { line: "Entry: 203",                   delay: 1500 },
+  { line: "no product - P1: 200g =P5",    delay: 1500 },
+  { line: "insert coin - (no coin)",      delay: 900 },
+  { line: "payment status: No coin detected", delay: 1500 },
+  { line: "HonestPay Ready",              delay: 1500 },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -481,7 +471,7 @@ export default function Dashboard() {
     const eventTimestamp = new Date().toISOString();
 
     // Apply to state machine
-    const trigger = eventToTrigger(parsed.event);
+    const trigger = eventToTrigger(parsed.event, parsed.paymentStatus);
     applyTrigger(trigger, sm.state, sm.transition, {
       product: parsed.product ?? undefined,
       weight: parsed.weight ?? undefined,
@@ -515,7 +505,9 @@ export default function Dashboard() {
       timestamp: eventTimestamp,
       event: parsed.event,
       product: parsed.product,
+      paymentStatus: parsed.paymentStatus,
       weight: parsed.weight,
+      rawLine: parsed.rawLine,
     });
 
     ongoingTransactionRef.current = next.draft;
@@ -733,7 +725,7 @@ export default function Dashboard() {
                 <input type="text" value={manualLine}
                   onChange={(e) => setManualLine(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleManualAdd()}
-                  placeholder='"Entry: 124"  "Product Removed. Pay Product One (PHP5)."  "Inserted: PHP5"  "Remaining: PHP0"  "Payment OK"'
+                  placeholder='"no product - P1: 200g =P5"  "Coin Detected: 7.3g -> PHP5"  "PAYMENT INVALID"  "payment status: Insufficient"'
                   className="flex-1 px-3 py-2 bg-background border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
                 <button onClick={handleManualAdd}
                   className="px-4 py-2 bg-primary text-white rounded-lg font-semibold text-sm hover:bg-blue-800">
@@ -742,13 +734,13 @@ export default function Dashboard() {
               </div>
               <div className="flex flex-wrap gap-1.5 mt-3">
                 {[
-                  "HonestPay Ready", "Entry: 124", "Customer Entered",
-                  `Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`, `Pay ${PRODUCT_CATALOG.PHP5.label}`,
-                  `Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`, `Pay ${PRODUCT_CATALOG.PHP10.label}`,
-                  "Coin Detected: 7.3g -> PHP5 ACCEPTED", "Coin Detected: 8.8g -> PHP10 ACCEPTED",
-                  "Coin Detected: 7.9g -> INVALID COIN",
-                  "Inserted: PHP5", "Remaining: PHP5", "Remaining: PHP0",
-                  "Dispensing Product...", "Payment OK", "Add More Coins", "Customer Left",
+                  "HonestPay Ready", "Entry: 124",
+                  "no product - P1: 200g =P5", "no product - P2: 200g =P10",
+                  "insert coin - COIN : 5PESOS", "insert coin - COIN : 10PESOS",
+                  "Coin Detected: 7.3g -> PHP5", "Coin Detected: 8.8g -> PHP10",
+                  "PAYMENT INVALID", "payment status: Insufficient",
+                  "insert coin - (no coin)", "payment status: No coin detected",
+                  "Payment OK", "Dispensing Product...", "Customer Left",
                 ].map((s, qi) => (
                   <button key={qi} onClick={() => handleLine(s)}
                     className="px-2 py-1 bg-muted hover:bg-muted/60 border border-border rounded text-xs font-mono transition-colors">
@@ -773,7 +765,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="font-bold text-sm">Customer Flow</h3>
                   <span className="text-xs text-muted-foreground">
-                    Idle reset: 30s • OK: 3s • Error: 5s
+                    Idle reset: 30s • Result reset: 4s
                   </span>
                 </div>
                 <FlowIndicator current={sm.state} />
