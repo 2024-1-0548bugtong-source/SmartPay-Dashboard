@@ -1,435 +1,441 @@
-// SmartPay Arduino Sketch
-// Hardware:
-// - Arduino Nano ATmega328P
-// - 20x4 LCD Display with I2C interface
-// - HX711 Load Cell Amplifier (x2): 3kg (product), 1kg (coins)
-// - PIR Motion Sensor SR501
-// - 5V Buzzer (active/passive)
-// - HC-05 Bluetooth (optional)
+// SmartPay Final Production Sketch
+// Source of truth: code.md
+// Board: Arduino Uno/Nano (ATmega328P), Baud: 9600
+//
+// Pin map summary:
+// HX711 Product DT/SCK: D2/D3
+// HX711 Coin DT/SCK: D4/D5
+// Buzzer: D6
+// HC-05 RX/TX: D11/D12
+// Ultrasonic TRIG/ECHO: D9/D10
 
+#include <EEPROM.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <SoftwareSerial.h>
 #include "HX711.h"
 
-// ── HC-05 Bluetooth Configuration ─────────────────────────────────────
-// Configure these pins for HC-05 communication (must be digital pins that support SoftwareSerial)
-// For Arduino Nano: pins 0 and 1 are hardware serial, so we use pins 10 and 11 for software serial
-#define HC05_RX_PIN 10    // Connect HC-05 TX to pin 10
-#define HC05_TX_PIN 11    // Connect HC-05 RX to pin 11
-SoftwareSerial hc05Serial(HC05_RX_PIN, HC05_TX_PIN);  // RX, TX
-bool hc05Enabled = true;  // Set to false if HC-05 is not connected
+/* ================= BLUETOOTH ================= */
+// Keep HC-05 on 11/12 because pin 10 is used by ultrasonic ECHO.
+#define HC05_RX_PIN 11
+#define HC05_TX_PIN 12
+SoftwareSerial hc05Serial(HC05_RX_PIN, HC05_TX_PIN);
+bool hc05Enabled = true;
 
-// ── Pins ──────────────────────────────────────────────────────────────
-
-// HX711 Load Cells
-#define PRODUCT_CELL_DT 2     // 3kg load cell (product detection)
+/* ================= HX711 PINS ================= */
+#define PRODUCT_CELL_DT 2
 #define PRODUCT_CELL_SCK 3
-#define COIN_CELL_DT 4        // 1kg load cell (coin payment)
+#define COIN_CELL_DT 4
 #define COIN_CELL_SCK 5
 
-// PIR Motion Sensor
-#define PIR_PIN 6
-
-// Buzzer
-#define BUZZER_PIN 7
-
-// Single external waiting-for-payment LED (placed near buzzer)
-// Use D8 so wiring sits next to buzzer on D7.
-#define LED_WAITING 8
-
-// LCD I2C address (usually 0x27 or 0x3F, adjust if needed)
-#define LCD_I2C_ADDR 0x27
-#define LCD_COLS 20
-#define LCD_ROWS 4
-
-// ── Weight Thresholds ─────────────────────────────────────────────────
-
-// Product weights (grams) — adjust based on your products
-#define PRODUCT_ONE_MIN_WEIGHT 150    // ~Product One (PHP5)
-#define PRODUCT_ONE_MAX_WEIGHT 250
-#define PRODUCT_TWO_MIN_WEIGHT 50     // ~Product Two (PHP10)
-#define PRODUCT_TWO_MAX_WEIGHT 120
-
-// Coin weight thresholds (grams)
-#define COIN_DETECT_MIN 6.5f          // Ignore noise below this
-#define COIN_RESET_MAX 1.0f           // Coin is considered removed below this
-#define COIN_PHP5_MIN 7.15f
-#define COIN_PHP5_MAX 7.75f
-#define COIN_PHP10_MIN 8.45f
-#define COIN_PHP10_MAX 9.05f
-#define COIN_STABILIZE_MS 500
-
-// ── State Machine ─────────────────────────────────────────────────────
-
-enum SmState {
-  STATE_READY,
-  STATE_CUSTOMER_DETECTED,
-  STATE_PRODUCT_SELECTED,
-  STATE_WAITING_FOR_COIN,
-  STATE_COIN_DETECTED,
-  STATE_COIN_VALIDATED,
-  STATE_PAYMENT_OK,
-  STATE_PAYMENT_FAILED,
-};
-
-// ── Globals ───────────────────────────────────────────────────────────
-
-LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 HX711 productScale;
 HX711 coinScale;
+/* ================= EEPROM ================= */
+#define EEPROM_PRODUCT_SCALE_ADDR 0
+#define EEPROM_COIN_SCALE_ADDR    4
 
-SmState currentState = STATE_READY;
-unsigned long stateChangeTime = 0;
-int entryCount = 0;
-int selectedProduct = 0;  // 1 = PHP5, 2 = PHP10
-int paidAmount = 0;
+/*===========door sensor=========*/
+#define TRIG_PIN 9
+#define ECHO_PIN 10
+#define BUZZER_PIN 6
+
+#define CHANGE_THRESHOLD 3  // how much closer (cm) to trigger
+
+long baseline = 0;
+bool personDetected = false;
+unsigned long lastEntryEventMs = 0;
+const unsigned long ENTRY_COOLDOWN_MS = 3000;
+
+/* ================= LCD ================= */
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+/* ================= GLOBALS ================= */
+float productScaleFactor = 724.0;
+float coinScaleFactor = 420.0;
+
+int entryCounter = 0;
+int previousProductType = 0;
 int lastCoinValue = 0;
-float lastCoinWeight = 0.0f;
-float previousCoinWeight = 0.0f;
-bool coinLatched = false;
+int insertedAmount = 0;
+int requiredAmount = 0;
+bool checkoutActive = false;
 
-// ── Setup ─────────────────────────────────────────────────────────────
+/* ================= FUNCTION DECLARATIONS ================= */
+void handleCalibrationInputs();
+void processCalibrationCommand(String cmd);
+void loadCalibration();
+void sendMessage(const char* msg);
+int detectProduct(float weight);
+int detectCoin(float weight);
+void updateLCD(int productType, float productW, int coinValue, bool paid, bool invalidCoinState);
+float getStableWeight(HX711 &scale);
+const char* productLabelFromType(int productType);
+int productPriceFromType(int productType);
 
+/* ================= SETUP ================= */
 void setup() {
+  /*==========door sensor setup=======*/
   Serial.begin(9600);
-  
-  // Initialize HC-05 Bluetooth at 9600 baud (default HC-05 baudrate)
-  if (hc05Enabled) {
-    hc05Serial.begin(9600);
-  }
-  
-  pinMode(PIR_PIN, INPUT);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(LED_WAITING, OUTPUT);
-  digitalWrite(LED_WAITING, LOW);
-  
-  // Initialize load cells
+
+  digitalWrite(BUZZER_PIN, LOW);
+
+  delay(1000); // let sensor stabilize
+
+  // 🔹 get baseline distance (average of 5 readings)
+  long sum = 0;
+  for (int i = 0; i < 2; i++) {
+    sum += getDistance();
+    delay(100);
+  }
+  baseline = sum / 2;
+
+  //bluetooth part==========================
+  if (hc05Enabled) hc05Serial.begin(9600);
+
   productScale.begin(PRODUCT_CELL_DT, PRODUCT_CELL_SCK);
   coinScale.begin(COIN_CELL_DT, COIN_CELL_SCK);
 
-  // Calibration factors (adjust based on your calibration procedure)
-  // You may need to run a calibration sketch first
-  productScale.set_scale(420.0);    // Adjust this value
-  productScale.tare();              // Reset to 0g
-  coinScale.set_scale(420.0);       // Adjust this value
-  coinScale.tare();                 // Reset to 0g
+  productScale.set_scale(420.0);
+  coinScale.set_scale(420.0);
 
-  // Initialize LCD
+  productScale.tare();
+  coinScale.tare();
+
   lcd.init();
   lcd.backlight();
-  lcd.print("SmartPay Ready");
-  
-  // Send to serial
+
+  loadCalibration();
+
+  productScale.set_scale(productScaleFactor);
+  coinScale.set_scale(coinScaleFactor);
+
+  productScale.tare();
+  coinScale.tare();
+
   sendMessage("SmartPay Ready");
-  
-  delay(1000);
-  lcd.clear();
+  lcd.print("SmartPay Ready");
+  //end of bluetooth part=============================
 }
 
-// ── Loop ──────────────────────────────────────────────────────────────
+long getDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
 
-void loop() {
-  bool pirDetected = digitalRead(PIR_PIN) == HIGH;
-  float productWeight = productScale.get_units(10);  // Average of 10 readings
-  float coinWeight = coinScale.get_units(10);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // timeout
+  if (duration == 0) return -1;
 
-  // State machine
-  switch (currentState) {
-    case STATE_READY:
-      handleReady(pirDetected);
-      break;
-    case STATE_CUSTOMER_DETECTED:
-      handleCustomerDetected(productWeight, pirDetected);
-      break;
-    case STATE_PRODUCT_SELECTED:
-      handleProductSelected();
-      break;
-    case STATE_WAITING_FOR_COIN:
-      handleWaitingForCoin(coinWeight);
-      break;
-    case STATE_COIN_DETECTED:
-      handleCoinDetected();
-      break;
-    case STATE_COIN_VALIDATED:
-      handleCoinValidated(coinWeight);
-      break;
-    case STATE_PAYMENT_OK:
-      handlePaymentOk();
-      break;
-    case STATE_PAYMENT_FAILED:
-      handlePaymentFailed(coinWeight);
-      break;
-  }
-
-  // Track previous sensor value for edge-triggered coin detection.
-  previousCoinWeight = coinWeight;
-
-  delay(200);  // Debounce delay
+  return duration * 0.034 / 2;
 }
 
-// ── State Handlers ────────────────────────────────────────────────────
-
-void handleReady(bool pirDetected) {
-  digitalWrite(LED_WAITING, LOW);
-  if (pirDetected) {
-    entryCount++;
-    paidAmount = 0;
-    selectedProduct = 0;
-    coinLatched = false;
-    transitionTo(STATE_CUSTOMER_DETECTED);
-    
-    // Send entry event
-    sendEntryCount(entryCount);
-    sendMessage("Customer Entered");
-    
-    lcdShow("Customer", "Entered");
-    buzz(150);
-  }
-}
-
-void handleCustomerDetected(float productWeight, bool pirDetected) {
-  if (!pirDetected) {
-    // Customer left without buying
-    digitalWrite(LED_WAITING, LOW);
-    transitionTo(STATE_READY);
-    sendMessage("Customer Left");
-    lcdShow("SmartPay", "Ready");
-    return;
-  }
-
-  // Check if product is placed on 3kg scale
-  if (productWeight > 40.0f) {  // Threshold to detect product
-    // Determine which product
-    if (productWeight >= PRODUCT_ONE_MIN_WEIGHT && productWeight <= PRODUCT_ONE_MAX_WEIGHT) {
-      selectedProduct = 1;  // Product One (PHP5)
-      paidAmount = 0;
-      transitionTo(STATE_PRODUCT_SELECTED);
-      digitalWrite(LED_WAITING, HIGH);
-      sendMessage("Product Removed. Pay Product One (PHP5).");
-      lcdShow("Product One", "PHP5");
-      buzz(100);
-      delay(500);
-      buzz(100);
-    } else if (productWeight >= PRODUCT_TWO_MIN_WEIGHT && productWeight <= PRODUCT_TWO_MAX_WEIGHT) {
-      selectedProduct = 2;  // Product Two (PHP10)
-      paidAmount = 0;
-      transitionTo(STATE_PRODUCT_SELECTED);
-      digitalWrite(LED_WAITING, HIGH);
-      sendMessage("Product Removed. Pay Product Two (PHP10).");
-      lcdShow("Product Two", "PHP10");
-      buzz(100);
-      delay(500);
-      buzz(100);
-    }
-  }
-}
-
-void handleProductSelected() {
-  transitionTo(STATE_WAITING_FOR_COIN);
-  digitalWrite(LED_WAITING, HIGH);
-  if (selectedProduct == 1) {
-    sendMessage("Pay Product One (PHP5)");
-    lcdShow("Pay", "Product One");
-  } else {
-    sendMessage("Pay Product Two (PHP10)");
-    lcdShow("Pay", "Product Two");
-  }
-}
-
-void handleWaitingForCoin(float coinWeight) {
-  digitalWrite(LED_WAITING, HIGH);
-  // Anti-double count: only detect on edge transition <1g -> >6.5g.
-  if (!coinLatched && previousCoinWeight < COIN_RESET_MAX && coinWeight > COIN_DETECT_MIN) {
-    coinLatched = true;
-    transitionTo(STATE_COIN_DETECTED);
-  }
-}
-
-void handleCoinDetected() {
-  if (millis() - stateChangeTime < COIN_STABILIZE_MS) {
-    return;
-  }
-
-  // Average multiple samples for stable classification.
-  lastCoinWeight = coinScale.get_units(10);
-  lastCoinValue = classifyCoin(lastCoinWeight);
-  transitionTo(STATE_COIN_VALIDATED);
-}
-
-void handleCoinValidated(float coinWeight) {
-  bool paymentOk = false;
-
-  if (lastCoinValue > 0) {
-    paidAmount += lastCoinValue;
-    sendCoinResult(lastCoinWeight, lastCoinValue);
-  } else {
-    sendCoinResult(lastCoinWeight, -1);
-  }
-
-  sendCurrencyLine("Inserted", paidAmount);
-
-  sendCurrencyLine("Remaining", remainingAmount());
-
-  if (paidAmount >= requiredAmount()) {
-    paymentOk = true;
-  }
-
-  if (paymentOk) {
-    transitionTo(STATE_PAYMENT_OK);
-    sendMessage("Dispensing Product...");
-    sendMessage("Payment OK");
-    lcdShow("Payment OK", "Thank you!");
-    buzz(200);
+void beepTwice() {
+  for (int i = 0; i < 2; i++) {
+    tone(BUZZER_PIN, 1000);  // 🔊 passive buzzer needs tone()
     delay(300);
-    buzz(200);
-    return;
-  }
-
-  sendMessage("Add More Coins");
-  lcdShow("Add More", "Coins");
-  buzz(100);
-  transitionTo(STATE_PAYMENT_FAILED);
-
-  // Wait for the coin to clear before accepting the next coin.
-  if (coinWeight < COIN_RESET_MAX) {
-    coinLatched = false;
+    noTone(BUZZER_PIN);
+    delay(200);
   }
 }
+  /*=======end of door sensor setup======*/
 
-void handlePaymentOk() {
-  digitalWrite(LED_WAITING, LOW);
-  // Reset after 3 seconds
-  if (millis() - stateChangeTime > 3000) {
-    transitionTo(STATE_READY);
-    sendMessage("Customer Left");
-    sendMessage("SmartPay Ready");
-    lcdShow("SmartPay", "Ready");
-    coinScale.tare();
-    productScale.tare();
-  }
-}
+/* ================= LOOP ================= */
+void loop() {
+  /*=============door sensor loop====*/
+  long distance = getDistance();
+  if (distance < 0) return;
 
-void handlePaymentFailed(float coinWeight) {
-  digitalWrite(LED_WAITING, HIGH);
-  // Reset latch once the current coin leaves the scale.
-  if (coinWeight < COIN_RESET_MAX) {
-    coinLatched = false;
-    transitionTo(STATE_WAITING_FOR_COIN);
-    return;
-  }
+  Serial.print("Distance: ");
+  Serial.println(distance);
 
-  // Timeout if user leaves coins sitting or no valid follow-up happens.
-  if (millis() - stateChangeTime > 5000) {
-    transitionTo(STATE_READY);
-    sendMessage("Customer Left");
-    sendMessage("SmartPay Ready");
-    lcdShow("SmartPay", "Ready");
-    coinScale.tare();
-    productScale.tare();
-  }
-}
+  // 🔥 detect if something is closer than normal
+  unsigned long nowMs = millis();
+  if (distance > 0 &&
+    (baseline - distance) > CHANGE_THRESHOLD &&
+    !personDetected &&
+    (nowMs - lastEntryEventMs) >= ENTRY_COOLDOWN_MS) {
+    beepTwice();
+    personDetected = true;
+    lastEntryEventMs = nowMs;
 
-// ── Helpers ───────────────────────────────────────────────────────────
-
-void transitionTo(SmState newState) {
-  currentState = newState;
-  stateChangeTime = millis();
-}
-
-void lcdShow(const char* line1, const char* line2) {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1);
-  lcd.setCursor(0, 1);
-  lcd.print(line2);
-}
-
-void buzz(int duration) {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(duration);
-  digitalWrite(BUZZER_PIN, LOW);
-}
-
-int requiredAmount() {
-  return selectedProduct == 1 ? 5 : 10;
-}
-
-int remainingAmount() {
-  int rem = requiredAmount() - paidAmount;
-  return rem > 0 ? rem : 0;
-}
-
-int classifyCoin(float weight) {
-  if (weight < COIN_DETECT_MIN) {
-    return 0;
+    entryCounter++;
+    char entryMsg[24];
+    snprintf(entryMsg, sizeof(entryMsg), "Entry: %d", entryCounter);
+    sendMessage(entryMsg);
+    sendMessage("Customer Entered");
   }
 
-  if (weight >= COIN_PHP5_MIN && weight <= COIN_PHP5_MAX) {
-    return 5;
+  // ✅ reset when back to normal
+  if ((baseline - distance) <= 1 && personDetected) {
+    //Serial.println("✅ Clear again");
+    personDetected = false;
   }
 
-  if (weight >= COIN_PHP10_MIN && weight <= COIN_PHP10_MAX) {
-    return 10;
+  delay(100);
+  /*=========== end door sensor loop=====*/
+
+  handleCalibrationInputs();
+
+  float productW = getStableWeight(productScale);
+  float coinW = getStableWeight(coinScale);
+
+  // Continuous telemetry so dashboard receives live data even before event transitions.
+  char telemetryMsg[64];
+  snprintf(telemetryMsg, sizeof(telemetryMsg), "Product: %.2f g | Coin: %.2f g", productW, coinW);
+  sendMessage(telemetryMsg);
+
+  int productType = detectProduct(productW);
+  int coinValue = detectCoin(coinW);
+
+  bool paymentOK = false;
+  bool invalidCoinState = false;
+
+  if (productType > 0 && previousProductType == 0) {
+    checkoutActive = true;
+    insertedAmount = 0;
+    requiredAmount = productPriceFromType(productType);
+    lastCoinValue = 0; // reset edge detector for new checkout session
+    coinScale.tare();  // clear residual coin weight from previous attempt
+
+    const char* label = productLabelFromType(productType);
+    char promptMsg[80];
+    snprintf(promptMsg, sizeof(promptMsg), "Product Removed. Pay %s.", label);
+    sendMessage(promptMsg);
+
+    char payMsg[64];
+    snprintf(payMsg, sizeof(payMsg), "Pay %s", label);
+    sendMessage(payMsg);
   }
 
-  // Includes uncertain zone (7.75g, 8.45g) and out-of-range coins.
-  return -1;
-}
+  if (checkoutActive && coinValue > 0 && lastCoinValue == 0) {
+    int expectedCoin = requiredAmount;
+    if (coinValue != expectedCoin) {
+      char invalidCoinMsg[96];
+      snprintf(invalidCoinMsg, sizeof(invalidCoinMsg), "Coin Detected: %.1fg -> INVALID COIN", coinW);
+      sendMessage(invalidCoinMsg);
+      sendMessage("Payment Incomplete");
+      sendMessage("Add More Coins");
+      invalidCoinState = true;
+    } else {
+      char coinDetectedMsg[96];
+      snprintf(coinDetectedMsg, sizeof(coinDetectedMsg), "Coin Detected: %.1fg -> PHP%d ACCEPTED", coinW, coinValue);
+      sendMessage(coinDetectedMsg);
 
-void sendEntryCount(int count) {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "Entry: %d", count);
-  sendMessage(buf);
-}
+      insertedAmount += coinValue;
 
-void sendCurrencyLine(const char* label, int amount) {
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%s: PHP%d", label, amount);
-  sendMessage(buf);
-}
+      char insertedMsg[32];
+      snprintf(insertedMsg, sizeof(insertedMsg), "Inserted: PHP%d", insertedAmount);
+      sendMessage(insertedMsg);
 
-void sendCoinResult(float weight, int coinValue) {
-  char buf[48];
-  if (coinValue > 0) {
-    snprintf(buf, sizeof(buf), "Coin Detected: %.1fg -> PHP%d ACCEPTED", weight, coinValue);
-  } else {
-    snprintf(buf, sizeof(buf), "Coin Detected: %.1fg -> INVALID COIN", weight);
-  }
-  sendMessage(buf);
-}
+      int remaining = requiredAmount - insertedAmount;
+      if (remaining < 0) remaining = 0;
 
-// ── Calibration Helper (uncomment to run) ──────────────────────────────
+      char remainingMsg[32];
+      snprintf(remainingMsg, sizeof(remainingMsg), "Remaining: PHP%d", remaining);
+      sendMessage(remainingMsg);
 
-/*
-void calibrateLoadCells() {
-  Serial.println("=== Load Cell Calibration ===");
-  Serial.println("Place known weight on product cell and send 'p' to calibrate");
-  Serial.println("Place known weight on coin cell and send 'c' to calibrate");
-  
-  while (true) {
-    if (Serial.available()) {
-      char cmd = Serial.read();
-      if (cmd == 'p') {
-        Serial.print("Product cell raw reading: ");
-        Serial.println(productScale.get_value(10));
-      } else if (cmd == 'c') {
-        Serial.print("Coin cell raw reading: ");
-        Serial.println(coinScale.get_value(10));
+      if (remaining == 0) {
+        sendMessage("Dispensing Product...");
+        sendMessage("Payment OK");
+        paymentOK = true;
+        checkoutActive = false;
+      } else {
+        sendMessage("Add More Coins");
       }
     }
   }
+
+  if (checkoutActive && coinValue == 0 && coinW >= 6.5 && lastCoinValue == 0) {
+    char invalidCoinMsg[96];
+    snprintf(invalidCoinMsg, sizeof(invalidCoinMsg), "Coin Detected: %.1fg -> INVALID COIN", coinW);
+    sendMessage(invalidCoinMsg);
+    sendMessage("Payment Incomplete");
+    sendMessage("Add More Coins");
+    invalidCoinState = true;
+  }
+
+  if (previousProductType > 0 && productType == 0) {
+    sendMessage("Customer Left");
+    sendMessage("SmartPay Ready");
+    checkoutActive = false;
+    insertedAmount = 0;
+    requiredAmount = 0;
+    lastCoinValue = 0;
+  }
+
+  if (checkoutActive && insertedAmount >= requiredAmount && requiredAmount > 0) {
+    paymentOK = true;
+  }
+
+  Serial.print("Product Weight: ");
+  Serial.print(productW, 2);
+  Serial.print(" g | ");
+  Serial.print("Coin Weight: ");
+  Serial.print(coinW, 2);
+  Serial.print(" g | ");
+  Serial.print("Product Type: ");
+  Serial.print(productType);
+  Serial.print(" | Coin Value: ");
+  Serial.print(coinValue);
+  Serial.print(" | Payment: ");
+  Serial.println(paymentOK ? "OK" : "NOT OK");
+
+  updateLCD(productType, productW, coinValue, paymentOK, invalidCoinState);
+
+  previousProductType = productType;
+  lastCoinValue = coinValue;
+
+  delay(500);
 }
-*/
 
-// ── HC-05 Helper Function ─────────────────────────────────────────────
+/* ================= CALIBRATION HANDLERS ================= */
+void handleCalibrationInputs() {
+  if (Serial.available()) {
+    processCalibrationCommand(Serial.readStringUntil('\n'));
+  }
 
-void sendMessage(const char* message) {
-  // Send to USB serial (dashboard)
-  Serial.println(message);
-  
-  // Send to HC-05 Bluetooth if enabled
-  if (hc05Enabled) {
-    hc05Serial.println(message);
+  if (hc05Enabled && hc05Serial.available()) {
+    processCalibrationCommand(hc05Serial.readStringUntil('\n'));
+  }
+}
+
+void processCalibrationCommand(String cmd) {
+  cmd.trim();
+
+  // TARE
+  if (cmd == "T") {
+    productScale.tare();
+    coinScale.tare();
+    sendMessage("Scales ZEROED");
+  }
+  // PRODUCT CALIBRATION (P200)
+  else if (cmd.startsWith("P")) {
+    float knownWeight = cmd.substring(1).toFloat();
+    long raw = productScale.get_value(20);
+    productScaleFactor = raw / knownWeight;
+    productScale.set_scale(productScaleFactor);
+
+    sendMessage("Product calibrated");
+  }
+  // COIN CALIBRATION (C7.4)
+  else if (cmd.startsWith("C")) {
+    float knownWeight = cmd.substring(1).toFloat();
+    long raw = coinScale.get_value(20);
+    coinScaleFactor = raw / knownWeight;
+    coinScale.set_scale(coinScaleFactor);
+
+    sendMessage("Coin calibrated");
+  }
+  // SAVE EEPROM
+  else if (cmd == "S") {
+    EEPROM.put(EEPROM_PRODUCT_SCALE_ADDR, productScaleFactor);
+    EEPROM.put(EEPROM_COIN_SCALE_ADDR, coinScaleFactor);
+    sendMessage("Calibration SAVED");
+  }
+}
+
+/* ================= EEPROM ================= */
+void loadCalibration() {
+  EEPROM.get(EEPROM_PRODUCT_SCALE_ADDR, productScaleFactor);
+  EEPROM.get(EEPROM_COIN_SCALE_ADDR, coinScaleFactor);
+
+  if (productScaleFactor < 100 || coinScaleFactor < 100) {
+    productScaleFactor = 420.0;
+    coinScaleFactor = 420.0;
+  }
+}
+
+/* ================= UTIL ================= */
+void sendMessage(const char* msg) {
+  Serial.println(msg);
+  if (hc05Enabled) hc05Serial.println(msg);
+}
+
+/* ================= PRODUCT DETECTION KILO UDJUSTMENT ================= */
+int detectProduct(float weight) {
+  if (weight > 200 && weight < 400) return 1; // ~200g
+  if (weight > 650 && weight < 750) return 2; // ~400g
+  return 0; // no product / unknown
+}
+
+/* ================= COIN DETECTION KILO UDJUSTMENT ================= */
+int detectCoin(float weight) {
+  if (weight >= 35 && weight <= 38) return 5;   // ₱5
+  if (weight >= 40 && weight <= 50) return 10;  // ₱10
+  return 0; // no coin
+}
+
+/* ================= STABLE READING ================= */
+float getStableWeight(HX711 &scale) {
+  float total = 0;
+  for (int i = 0; i < 3; i++) {
+    total += scale.get_units(5);
+  }
+  float weight = total / 3;
+  if (weight < 0) return 0;
+  return weight;
+}
+
+const char* productLabelFromType(int productType) {
+  if (productType == 1) return "Product One (PHP5)";
+  if (productType == 2) return "Product Two (PHP10)";
+  return "Unknown Product";
+}
+
+int productPriceFromType(int productType) {
+  if (productType == 1) return 5;
+  if (productType == 2) return 10;
+  return 0;
+}
+
+/* ================= LCD ================= */
+void updateLCD(int productType, float productW, int coinValue, bool paid, bool invalidCoinState) {
+  lcd.setCursor(0, 0);
+  lcd.print("SMART PAY READY   ");
+
+  // PRODUCT LINE
+  lcd.setCursor(0, 1);
+  if (productType == 1) {
+    lcd.print("P1: 200g = P5     ");
+  }
+  else if (productType == 2) {
+    lcd.print("P2: 400g = P10    ");
+  }
+  else {
+    lcd.print("NO PRODUCT        ");
+  }
+
+  // COIN LINE
+  lcd.setCursor(0, 2);
+  if (coinValue == 5) {
+    lcd.print("COIN: 5 PESOS     ");
+  }
+  else if (coinValue == 10) {
+    lcd.print("COIN: 10 PESOS    ");
+  }
+  else if (coinValue < 0) {
+    lcd.print("INVALID COIN      ");
+  }
+  else {
+    lcd.print("INSERT COIN       ");
+  }
+
+  // STATUS LINE
+  lcd.setCursor(0, 3);
+  if (paid) {
+    lcd.print("PAYMENT SUCCESS   ");
+    delay(2000);
+    coinScale.tare(); // reset after payment
+  }
+  else if (invalidCoinState) {
+    lcd.print("INVALID COIN      ");
+  }
+  else {
+    lcd.print("WAITING PAYMENT   ");
   }
 }

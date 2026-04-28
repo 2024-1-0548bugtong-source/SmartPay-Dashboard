@@ -56,7 +56,7 @@ void loadCalibration();
 void sendMessage(const char* msg);
 int detectProduct(float weight);
 int detectCoin(float weight);
-void updateLCD(int productType, float productW, int coinValue, bool paid);
+void updateLCD(int productType, float productW, int coinValue, bool paid, bool invalidCoinState);
 float getStableWeight(HX711 &scale);
 const char* productLabelFromType(int productType);
 int productPriceFromType(int productType);
@@ -177,11 +177,14 @@ void loop() {
   int coinValue = detectCoin(coinW);
 
   bool paymentOK = false;
+  bool invalidCoinState = false;
 
   if (productType > 0 && previousProductType == 0) {
     checkoutActive = true;
     insertedAmount = 0;
     requiredAmount = productPriceFromType(productType);
+    lastCoinValue = 0; // reset edge detector for new checkout session
+    coinScale.tare();  // clear residual coin weight from previous attempt
 
     const char* label = productLabelFromType(productType);
     char promptMsg[80];
@@ -194,30 +197,55 @@ void loop() {
   }
 
   if (checkoutActive && coinValue > 0 && lastCoinValue == 0) {
-    char coinDetectedMsg[96];
-    snprintf(coinDetectedMsg, sizeof(coinDetectedMsg), "Coin Detected: %.1fg -> PHP%d ACCEPTED", coinW, coinValue);
-    sendMessage(coinDetectedMsg);
-
-    insertedAmount += coinValue;
-
-    char insertedMsg[32];
-    snprintf(insertedMsg, sizeof(insertedMsg), "Inserted: PHP%d", insertedAmount);
-    sendMessage(insertedMsg);
-
-    int remaining = requiredAmount - insertedAmount;
-    if (remaining < 0) remaining = 0;
-
-    char remainingMsg[32];
-    snprintf(remainingMsg, sizeof(remainingMsg), "Remaining: PHP%d", remaining);
-    sendMessage(remainingMsg);
-
-    if (remaining == 0) {
-      sendMessage("Dispensing Product...");
-      sendMessage("Payment OK");
-      paymentOK = true;
-      checkoutActive = false;
-    } else {
+    int expectedCoin = requiredAmount;
+    if (coinValue != expectedCoin) {
+      char invalidCoinMsg[96];
+      snprintf(invalidCoinMsg, sizeof(invalidCoinMsg), "Coin Detected: %.1fg -> INVALID COIN", coinW);
+      sendMessage(invalidCoinMsg);
+      sendMessage("Payment Incomplete");
       sendMessage("Add More Coins");
+      invalidCoinState = true;
+    } else {
+      char coinDetectedMsg[96];
+      snprintf(coinDetectedMsg, sizeof(coinDetectedMsg), "Coin Detected: %.1fg -> PHP%d ACCEPTED", coinW, coinValue);
+      sendMessage(coinDetectedMsg);
+
+      insertedAmount += coinValue;
+
+      char insertedMsg[32];
+      snprintf(insertedMsg, sizeof(insertedMsg), "Inserted: PHP%d", insertedAmount);
+      sendMessage(insertedMsg);
+
+      int remaining = requiredAmount - insertedAmount;
+      if (remaining < 0) remaining = 0;
+
+      char remainingMsg[32];
+      snprintf(remainingMsg, sizeof(remainingMsg), "Remaining: PHP%d", remaining);
+      sendMessage(remainingMsg);
+
+      if (remaining == 0) {
+        sendMessage("Dispensing Product...");
+        sendMessage("Payment OK");
+        paymentOK = true;
+        checkoutActive = false;
+      } else {
+        sendMessage("Add More Coins");
+      }
+    }
+  }
+
+  if (checkoutActive && coinValue == 0 && lastCoinValue == 0) {
+    bool invalidCoin = false;
+    if (productType == 1 && coinW > 0 && coinW < 35) invalidCoin = true;
+    if (productType == 2 && coinW > 0 && coinW < 40) invalidCoin = true;
+
+    if (invalidCoin) {
+      char invalidCoinMsg[96];
+      snprintf(invalidCoinMsg, sizeof(invalidCoinMsg), "Coin Detected: %.1fg -> INVALID COIN", coinW);
+      sendMessage(invalidCoinMsg);
+      sendMessage("Payment Incomplete");
+      sendMessage("Add More Coins");
+      invalidCoinState = true;
     }
   }
 
@@ -227,12 +255,13 @@ void loop() {
     checkoutActive = false;
     insertedAmount = 0;
     requiredAmount = 0;
+    lastCoinValue = 0;
   }
 
   if (checkoutActive && insertedAmount >= requiredAmount && requiredAmount > 0) {
     paymentOK = true;
   }
-  updateLCD(productType, productW, coinValue, paymentOK);
+  updateLCD(productType, productW, coinValue, paymentOK, invalidCoinState);
 
   previousProductType = productType;
   lastCoinValue = coinValue;
@@ -314,7 +343,7 @@ int detectProduct(float weight) {
 int detectCoin(float weight) {
   if (weight >= 35 && weight <= 38) return 5;   // ₱5
   if (weight >= 40 && weight <= 50) return 10;  // ₱10
-  return 0; // invalid / no coin
+  return 0; // no coin
 }
 
 /* ================= STABLE READING ================= */
@@ -323,7 +352,9 @@ float getStableWeight(HX711 &scale) {
   for (int i = 0; i < 3; i++) {
     total += scale.get_units(5);
   }
-  return total / 3;
+  float weight = total / 3;
+  if (weight < 0) return 0;
+  return weight;
 }
 
 const char* productLabelFromType(int productType) {
@@ -339,7 +370,7 @@ int productPriceFromType(int productType) {
 }
 
 /* ================= LCD ================= */
-void updateLCD(int productType, float productW, int coinValue, bool paid) {
+void updateLCD(int productType, float productW, int coinValue, bool paid, bool invalidCoinState) {
   lcd.setCursor(0, 0);
   lcd.print("SMART PAY READY   ");
 
@@ -347,10 +378,10 @@ void updateLCD(int productType, float productW, int coinValue, bool paid) {
   lcd.setCursor(0, 1);
   if (productType == 1) {
     lcd.print("P1: 200g = P5     ");
-  } 
+  }
   else if (productType == 2) {
     lcd.print("P2: 400g = P10    ");
-  } 
+  }
   else {
     lcd.print("NO PRODUCT        ");
   }
@@ -359,10 +390,13 @@ void updateLCD(int productType, float productW, int coinValue, bool paid) {
   lcd.setCursor(0, 2);
   if (coinValue == 5) {
     lcd.print("COIN: 5 PESOS     ");
-  } 
+  }
   else if (coinValue == 10) {
     lcd.print("COIN: 10 PESOS    ");
-  } 
+  }
+  else if (coinValue < 0) {
+    lcd.print("INVALID COIN      ");
+  }
   else {
     lcd.print("INSERT COIN       ");
   }
@@ -373,7 +407,10 @@ void updateLCD(int productType, float productW, int coinValue, bool paid) {
     lcd.print("PAYMENT SUCCESS   ");
     delay(2000);
     coinScale.tare(); // reset after payment
-  } 
+  }
+  else if (invalidCoinState) {
+    lcd.print("INVALID COIN      ");
+  }
   else {
     lcd.print("WAITING PAYMENT   ");
   }
