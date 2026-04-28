@@ -178,6 +178,7 @@ export function computeStats(rows: TransactionRow[]) {
 
   for (const row of sorted) {
     const ev = row.event.toLowerCase();
+    const paymentStatus = (row.paymentStatus ?? "").toLowerCase();
     const ts = new Date(row.timestamp).getTime();
 
     // Remember the product price from "Product Removed" / pay-prompt rows
@@ -202,7 +203,12 @@ export function computeStats(rows: TransactionRow[]) {
       if (match) totalRevenue += parseInt(match[1], 10);
       verifiedCount++;
       lastKnownProduct = null; // consumed
-    } else if (ev === "payment incomplete") {
+    } else if (
+      ev === "payment incomplete" ||
+      ev === "add more coins" ||
+      paymentStatus === "insufficient" ||
+      paymentStatus === "pending"
+    ) {
       insufficientCount++;
       // Don't clear lastKnownProduct — next attempt (if any) is for same product
     }

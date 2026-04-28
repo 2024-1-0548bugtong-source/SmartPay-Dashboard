@@ -12,6 +12,7 @@ import {
   useStateMachine, applyTrigger, eventToTrigger, SM_STATES,
   type SmState,
 } from "@/lib/stateMachine";
+import { useSocket } from "@/hooks/useSocket";
 
 // Web Serial API type declarations
 declare global {
@@ -43,7 +44,7 @@ const LCD_THEMES: Record<string, { bg: string; text: string; border: string; glo
 };
 
 const SM_STATE_LABEL: Record<SmState, string> = {
-  READY:   "SmartPay Ready",
+  READY:   "HonestPay Ready",
   ENTERED: "Customer Entered",
   PAY:     "Awaiting Payment",
   OK:      "Payment OK ✓",
@@ -210,7 +211,7 @@ function FlowIndicator({ current }: { current: SmState }) {
 // ── Demo runner ───────────────────────────────────────────────────────────
 
 const DEMO_SCRIPT = [
-  { line: "SmartPay Ready",               delay: 800  },
+  { line: "HonestPay Ready",              delay: 800  },
   { line: "Entry: 201",                   delay: 1500 },
   { line: "Customer Entered",             delay: 1000 },
   { line: `Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`, delay: 2000 },
@@ -220,7 +221,7 @@ const DEMO_SCRIPT = [
   { line: "Remaining: PHP0",              delay: 700 },
   { line: "Dispensing Product...",        delay: 900 },
   { line: "Payment OK",                   delay: 4000 }, // wait for 3s auto-reset
-  { line: "SmartPay Ready",               delay: 1000 },
+  { line: "HonestPay Ready",              delay: 1000 },
   { line: "Entry: 202",                   delay: 1500 },
   { line: `Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`, delay: 1500 },
   { line: `Pay ${PRODUCT_CATALOG.PHP10.label}`, delay: 1000 },
@@ -322,6 +323,13 @@ export default function Dashboard() {
     saveDarkMode(darkMode);
   }, [darkMode]);
 
+  // ── Clear transaction logs on startup (fresh start) ──
+  useEffect(() => {
+    localStorage.removeItem("smartpay_transactions");
+    setTransactions([]);
+    console.log("[STARTUP] Transaction logs cleared");
+  }, []);
+
   // ── Persist transactions ──
   useEffect(() => { saveTransactions(transactions); }, [transactions]);
 
@@ -363,7 +371,9 @@ export default function Dashboard() {
     };
   }, []);
 
-  // ── Fetch and poll transactions from API ──
+  // ── Fetch and poll transactions from API with Socket.io real-time support ──
+  const { socket, isConnected } = useSocket();
+  
   useEffect(() => {
     const fetchTransactions = async () => {
       try {
@@ -398,11 +408,17 @@ export default function Dashboard() {
     // Fetch immediately on mount
     fetchTransactions();
 
-    // Then poll every 3 seconds for new transactions from the gateway
-    const interval = setInterval(fetchTransactions, 3000);
-    
-    return () => clearInterval(interval);
-  }, []);
+    // Set up real-time polling for live updates
+    if (isConnected) {
+      // Poll every 1 second for real-time feel
+      const interval = setInterval(fetchTransactions, 1000);
+      return () => clearInterval(interval);
+    } else {
+      // Fallback polling (should not reach here)
+      const interval = setInterval(fetchTransactions, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [socket]);
 
   // ── Core line handler (serial or manual) ──
   const handleLine = useCallback((rawLine: string) => {
@@ -853,7 +869,7 @@ export default function Dashboard() {
           <ArduinoGuide />
 
           <footer className="text-center text-xs text-muted-foreground py-3">
-            SmartPay Store Dashboard · Data stored locally &amp; synced · No login required
+            HonestPay Store Dashboard · Data stored locally &amp; synced · No login required
           </footer>
         </main>
       </div>

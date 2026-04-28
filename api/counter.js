@@ -19,6 +19,34 @@ function normalizeEvent(value) {
   return value.trim().toLowerCase();
 }
 
+function isPirEvent(value) {
+  const ev = normalizeEvent(value);
+  return ev === "entry" || ev === "customer entered" || ev === "customer_entered";
+}
+
+function computePirCount(rows) {
+  const PIR_DEDUPE_WINDOW_MS = 4000;
+
+  const candidates = rows
+    .filter((row) => isPirEvent(row.event))
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+
+  let count = 0;
+  let lastCountedAt = 0;
+
+  for (const row of candidates) {
+    const ts = Date.parse(row.timestamp);
+    if (!Number.isFinite(ts)) continue;
+
+    if (ts - lastCountedAt >= PIR_DEDUPE_WINDOW_MS) {
+      count += 1;
+      lastCountedAt = ts;
+    }
+  }
+
+  return count;
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") {
     return sendJson(res, 200, { ok: true });
@@ -29,7 +57,7 @@ module.exports = async function handler(req, res) {
   }
 
   const store = getStore();
-  const customerEnteredCount = store.filter((row) => normalizeEvent(row.event) === "customer_entered").length;
+  const customerEnteredCount = computePirCount(store);
 
   return sendJson(res, 200, {
     ok: true,
