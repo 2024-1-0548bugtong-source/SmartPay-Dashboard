@@ -116,8 +116,8 @@ void setup() {
   productScale.tare();
   coinScale.tare();
 
-  sendMessage("SmartPay Ready");
-  lcd.print("SmartPay Ready");
+  sendMessage("HonestPay Ready");
+  lcd.print("HonestPay Ready");
   //end of bluetooth part=============================
 }
 
@@ -261,7 +261,7 @@ void loop() {
 
   if (previousProductType > 0 && productType == 0) {
     sendMessage("Customer Left");
-    sendMessage("SmartPay Ready");
+    sendMessage("HonestPay Ready");
     checkoutActive = false;
     insertedAmount = 0;
     requiredAmount = 0;

@@ -48,3 +48,6 @@ to your actual port, such as `COM7`.
 
 cd /d D:\Users\user\Downloads\SmartPay-Dashboard
 npm run bridge:vercel -- COM5 https://smartpay-dashboard-two.vercel.app
+
+Restart the Node Server
+ps aux | grep -E "node|npm" | grep -v grep

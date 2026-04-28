@@ -3,7 +3,7 @@ const { ReadlineParser } = require("@serialport/parser-readline");
 
 const SERIAL_PORT = process.env.SERIAL_PORT || process.argv[2] || "COM5";
 const BAUD_RATE = Number(process.env.BAUD_RATE || 9600);
-const VERCEL_BASE_URL = (process.env.VERCEL_BASE_URL || process.argv[3] || "https://smartpay-dashboard-two.vercel.app").replace(/\/$/, "");
+const VERCEL_BASE_URL = (process.env.VERCEL_BASE_URL || process.argv[3] || "https://honest-pay-dashboard.vercel.app").replace(/\/$/, "");
 const API_URL = `${VERCEL_BASE_URL}/api/transactions`;
 const DEDUPE_WINDOW_MS = Number(process.env.DEDUPE_WINDOW_MS || 2500);
 
@@ -142,8 +142,8 @@ function parseSmartPayLine(rawLine) {
     return { event: "Customer Left", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
-  if (/^smartpay ready$/i.test(raw)) {
-    return { event: "SmartPay Ready", product: null, paymentStatus: null, weight: null, rawLine: raw };
+  if (/^(smartpay|honestpay) ready$/i.test(raw)) {
+    return { event: "HonestPay Ready", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   return null;
