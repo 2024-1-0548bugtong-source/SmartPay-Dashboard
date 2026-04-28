@@ -26,6 +26,10 @@ let lastEventAt = 0;
 let transactionStore = [];
 const MAX_TRANSACTIONS = 1000;
 
+// ── STARTUP: Clear all in-memory transactions ──
+console.log("[STARTUP] ✓ Transaction store initialized (empty)");
+console.log("[STARTUP] ✓ All old transactions cleared from memory");
+
 app.use(express.static(DASHBOARD_DIST_DIR));
 app.use(express.json());
 
