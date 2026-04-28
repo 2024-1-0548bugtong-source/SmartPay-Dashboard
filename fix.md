@@ -1,18 +1,107 @@
-1. the old live transaction are still there. i thought you fixed it
+Act as a senior full-stack developer and debug my vending machine system (Arduino hardware → serial bridge → web dashboard).
 
-Live Transaction Log
-61 entries
-Timestamp	Event	Product	Payment Status	Coin Value	Weight
-2026-04-28 09:09	Customer Left	—	—	—	—
-2026-04-28 09:09	Inserted Balance	—	—	—	—
-2026-04-28 09:09	Product Removed	Product Two (PHP10)	Pending	—	—
-2026-04-28 09:08	Entry	—	—	—	—
-2026-04-28 09:08	Customer Left	—	—	—	—
-2026-04-28 09:08	Inserted Balance	—	—	—	—
-2026-04-28 09:08	Product Removed	Product One (PHP5)	Pending
+## Problem Overview
 
-2. still no changes in dashboard through vercel it should be HonestPay Dashboard
-3. still the payment success is showing pending in the dashboard.
-4. can you remove the pending or if pending = payment OK = verified. then forward the success rate. 
-5. if invalid and insufficient coin treat it as fail in success rate.
-6. then Restart the app process that serves the dashboard (dev server or node server).
+My system has inconsistent logic between hardware and dashboard. The hardware correctly outputs payment results (SUCCESS / INVALID), but the dashboard shows incorrect or null payment status, wrong success rate, and incorrect revenue.
+
+## Requirements
+
+### 1. Fix Transaction Logic
+
+Each purchase must be treated as ONE transaction object, not multiple logs.
+
+Structure:
+
+```
+{
+  product: "P1" | "P2",
+  price: number,
+  inserted: number,
+  weight: number,
+  status: "SUCCESS" | "FAILED",
+  reason: "VALID" | "INVALID" | "INSUFFICIENT",
+  timestamp: Date
+}
+```
+
+### 2. Payment Rules
+
+* SUCCESS if inserted === price
+* FAILED otherwise
+
+Failure types:
+
+* No coin → INSUFFICIENT
+* Wrong coin → INVALID
+* Less than price → INSUFFICIENT
+
+### 3. Dashboard Fixes
+
+* Payment status must NEVER be null
+* Product Two must correctly show "Payment OK - Verified" when success
+* Remove intermediate logs like:
+
+  * "Add More Coins"
+  * "Customer Left"
+  * "Inserted Balance"
+* Only log FINAL transaction result
+
+### 4. Success Rate Logic
+
+```
+successRate = successTransactions / totalTransactions
+```
+
+* FAILED includes BOTH:
+
+  * INVALID
+  * INSUFFICIENT
+* Ensure insufficient transactions are counted
+
+### 5. Revenue Fix
+
+* Revenue must be dynamic
+* Only count SUCCESS transactions
+* Remove any hardcoded values
+
+### 6. Clear Logs Fix
+
+When "Clear Logs" is clicked:
+
+* Reset ALL:
+
+  * transaction list
+  * success count
+  * failure count
+  * revenue
+* UI and internal state must both reset
+
+### 7. Bridge Fix (Critical)
+
+Ensure the serial bridge:
+
+* Sends FINALIZED transaction only
+* Does NOT overwrite success with later events
+* Maintains correct event order
+
+### 8. Debug Requirement
+
+* Trace full flow: hardware → serial → backend → frontend
+* Identify where payment status becomes null
+* Fix race conditions or overwrites
+
+### 9. Code Quality
+
+* Use clean architecture
+* Avoid duplicate state
+* Ensure single source of truth for transactions
+* Add comments explaining logic
+
+## Goal
+
+Make the dashboard 100% reflect hardware truth with correct:
+
+* payment status
+* success rate
+* revenue
+* logs

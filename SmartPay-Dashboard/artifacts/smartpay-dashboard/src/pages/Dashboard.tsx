@@ -5,7 +5,7 @@ import {
 import {
   saveTransactions, loadDarkMode, saveDarkMode,
   exportCsv, computeStats, computePirFromTransactions,
-  type TransactionRow,
+  finalizeTransaction, type TransactionRow, type OngoingTransaction,
 } from "@/lib/storage";
 import { PRODUCT_CATALOG, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
 import {
@@ -248,53 +248,6 @@ function formatTimestamp(ts: string) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function extractCoinValue(row: TransactionRow): string | null {
-  if (!row.event.toLowerCase().includes("coin detected")) return null;
-
-  const fromRaw = row.rawLine?.match(/->\s*(PHP(?:5|10))\s+accepted/i)?.[1];
-  if (fromRaw) return fromRaw.toUpperCase();
-
-  const fromDetected = row.rawLine?.match(/^detected:\s*(5|10)\s*coins?\b/i)?.[1];
-  if (fromDetected) return `PHP${fromDetected}`;
-
-  const fromProduct = row.product?.match(/PHP\s*(5|10)/i)?.[1];
-  return fromProduct ? `PHP${fromProduct}` : null;
-}
-
-function extractPhpAmount(rawLine: string | null): number | null {
-  const m = rawLine?.match(/php\s*(\d+)/i)?.[1];
-  if (!m) return null;
-  const n = Number(m);
-  return Number.isFinite(n) ? n : null;
-}
-
-function EventBadge({ event }: { event: string }) {
-  const ev = event.toLowerCase();
-  let cls = "px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ";
-  if (ev === "entry") cls += "bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200";
-  else if (ev.includes("product removed")) cls += "bg-orange-100 text-orange-800 dark:bg-orange-900/60 dark:text-orange-200";
-  else if (ev.includes("coin detected")) cls += "bg-sky-100 text-sky-800 dark:bg-sky-900/60 dark:text-sky-200";
-  else if (ev.includes("invalid coin")) cls += "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200";
-  else if (ev.includes("inserted balance")) cls += "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-200";
-  else if (ev.includes("remaining balance")) cls += "bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200";
-  else if (ev.includes("dispensing")) cls += "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200";
-  else if (ev === "payment ok") cls += "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200";
-  else if (ev.includes("payment incomplete") || ev.includes("add more")) cls += "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200";
-  else if (ev === "customer left") cls += "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300";
-  else cls += "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400";
-  return <span className={cls}>{event}</span>;
-}
-
-function StatusBadge({ status }: { status: string | null }) {
-  if (!status) return <span className="text-muted-foreground">—</span>;
-  let cls = "px-2 py-0.5 rounded-full text-xs font-semibold ";
-  if (status === "Verified") cls += "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200";
-  else if (status === "Pending") cls += "bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200";
-  else if (status === "Insufficient") cls += "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200";
-  else cls += "bg-gray-100 text-gray-700";
-  return <span className={cls}>{status === "Pending" ? "Awaiting Payment" : status}</span>;
-}
-
 // ── Main Dashboard ────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -309,6 +262,7 @@ export default function Dashboard() {
   const [demoRunning, setDemoRunning] = useState(false);
   const [serialLcdState, setSerialLcdState] = useState<LcdState | null>(null);
   const [serialDebugLines, setSerialDebugLines] = useState<string[]>([]);
+  const [ongoingTransaction, setOngoingTransaction] = useState<OngoingTransaction | null>(null);
 
   const portRef = useRef<SerialPort | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -452,33 +406,80 @@ export default function Dashboard() {
       weight: parsed.weight ?? undefined,
     });
 
-    // PIR counter increment (Entry: lines only)
+    // PIR counter increment
     if (parsed.isPirEntry) {
-      // PIR count is derived from the transaction log — just trigger the flash animation
       setRecentPirFlash(true);
       setTimeout(() => setRecentPirFlash(false), 1500);
     }
 
-    // Add to transaction table + API
-    if (parsed.isLogEntry) {
-      const ts = new Date().toISOString();
-      const row: TransactionRow = {
-        id: `local-${Date.now()}-${Math.random()}`,
-        timestamp: ts,
-        event: parsed.event,
+    // ── Transaction consolidation logic ──
+    const evLower = parsed.event.toLowerCase();
+
+    // "Product Removed" → start new transaction
+    if (evLower.includes("product removed") && parsed.product) {
+      const priceMatch = parsed.product.match(/PHP(\d+)/i);
+      const price = priceMatch ? parseInt(priceMatch[1], 10) : 0;
+      setOngoingTransaction({
         product: parsed.product,
-        paymentStatus: parsed.paymentStatus,
-        weight: parsed.weight,
-        rawLine: parsed.rawLine,
-      };
-      setTransactions((prev) => [row, ...prev]);
-      fetch("/api/transactions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ timestamp: ts, event: parsed.event, product: parsed.product, paymentStatus: parsed.paymentStatus, weight: parsed.weight, rawLine: parsed.rawLine }),
-      }).catch(() => {});
+        price,
+        insertedCoins: 0,
+        totalWeight: 0,
+        startTime: Date.now(),
+      });
     }
-  }, [sm]);
+
+    // "Coin Detected" with accepted coin → accumulate
+    if (evLower.includes("coin detected") && parsed.product && ongoingTransaction) {
+      const coinValue = parsed.product.match(/PHP(\d+)/i)?.[1];
+      if (coinValue) {
+        const weight = parsed.weight ? parseFloat(parsed.weight) : 0;
+        setOngoingTransaction((prev) =>
+          prev
+            ? {
+                ...prev,
+                insertedCoins: prev.insertedCoins + parseInt(coinValue, 10),
+                totalWeight: prev.totalWeight + weight,
+              }
+            : null
+        );
+      }
+    }
+
+    // "Payment OK" → finalize as SUCCESS
+    if (evLower === "payment ok" && ongoingTransaction) {
+      const ts = new Date().toISOString();
+      const finalized = finalizeTransaction(ongoingTransaction, ts);
+      if (finalized) {
+        setTransactions((prev) => [finalized, ...prev]);
+        fetch("/api/transactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(finalized),
+        }).catch(() => {});
+      }
+      setOngoingTransaction(null);
+    }
+
+    // "Add More Coins" → finalize as FAILED (insufficient)
+    if (evLower === "add more coins" && ongoingTransaction) {
+      const ts = new Date().toISOString();
+      const finalized = finalizeTransaction(ongoingTransaction, ts);
+      if (finalized) {
+        setTransactions((prev) => [finalized, ...prev]);
+        fetch("/api/transactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(finalized),
+        }).catch(() => {});
+      }
+      setOngoingTransaction(null);
+    }
+
+    // Reset on "HonestPay Ready" or "Customer Left"
+    if (evLower === "honestpay ready" || evLower === "customer left") {
+      setOngoingTransaction(null);
+    }
+  }, [sm, ongoingTransaction]);
 
   // ── Web Serial ──
   const connectSerial = useCallback(async () => {
@@ -554,11 +555,6 @@ export default function Dashboard() {
 
   const stats = computeStats(transactions);
 
-  const latestInserted = transactions.find((r) => /inserted/i.test(r.event));
-  const latestRemaining = transactions.find((r) => /remaining/i.test(r.event));
-  const insertedAmount = extractPhpAmount(latestInserted?.rawLine ?? null);
-  const remainingAmount = extractPhpAmount(latestRemaining?.rawLine ?? null);
-
   const connBadge = connStatus === "connected"
     ? "bg-green-500/20 text-green-300 border border-green-500/30"
     : connStatus === "connecting"
@@ -601,15 +597,6 @@ export default function Dashboard() {
                 <span>💰</span>
                 <span>PHP {stats.totalRevenue}</span>
               </div>
-              {/* Running balance */}
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-bold bg-indigo-500/20 text-indigo-100 border border-indigo-300/20">
-                <span>➕</span>
-                <span>Inserted: PHP {insertedAmount ?? 0}</span>
-              </div>
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-bold bg-orange-500/20 text-orange-100 border border-orange-300/20">
-                <span>⌛</span>
-                <span>Remaining: PHP {remainingAmount ?? 0}</span>
-              </div>
               {/* Connection */}
               <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${connBadge}`}>
                 {connStatus === "connected" ? "🟢 Live" : connStatus === "connecting" ? "🟡 …" : "⚫ Off"}
@@ -650,7 +637,21 @@ export default function Dashboard() {
               📥 Export CSV
             </button>
             {transactions.length > 0 && (
-              <button onClick={() => { if (confirm("Clear all local transactions?")) setTransactions([]); }}
+              <button onClick={async () => {
+                if (!confirm("Clear all local transactions and reset remote store?")) return;
+                try {
+                  // Clear remote store if available
+                  await fetch('/api/transactions', { method: 'DELETE' });
+                } catch (e) {
+                  console.debug('Failed to clear remote store:', e);
+                }
+                // Clear local storage and PIR counter
+                localStorage.removeItem('smartpay_transactions');
+                localStorage.removeItem('smartpay_pir_counter');
+                setTransactions([]);
+                setLivePirCount(null);
+                console.log('[ACTION] Cleared local and remote transactions');
+              }}
                 className="px-4 py-2 text-sm text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800 rounded-lg hover:bg-red-50 dark:hover:bg-red-950 transition-colors">
                 🗑 Clear Log
               </button>
@@ -755,17 +756,13 @@ export default function Dashboard() {
 
           {/* ── Secondary Stat Cards ── */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <StatCard icon="🧾" label="Today's Events"  value={String(stats.todayCount)} />
-            <StatCard icon="💰" label="Revenue"         value={`PHP ${stats.totalRevenue}`}  valueClass="text-yellow-600 dark:text-yellow-400" />
+            <StatCard icon="🧾" label="Total Transactions"  value={String(stats.todayCount)} />
+            <StatCard icon="✅" label="Successful"  value={String(stats.successCount)} valueClass="text-green-600 dark:text-green-400" />
+            <StatCard icon="❌" label="Failed"  value={String(stats.failureCount)} valueClass="text-red-600 dark:text-red-400" />
             <StatCard
-              icon="✅"
+              icon="📊"
               label="Success Rate"
               value={stats.successRate !== null ? `${stats.successRate}%` : "—"}
-              sub={
-                stats.totalPaymentAttempts > 0
-                  ? `${stats.verifiedCount} OK · ${stats.insufficientCount} fail`
-                  : "No payments yet"
-              }
               valueClass={
                 stats.successRate === null
                   ? "text-muted-foreground"
@@ -776,7 +773,6 @@ export default function Dashboard() {
                   : "text-red-500"
               }
             />
-            <StatCard icon="⏱" label="Avg Time"        value={stats.avgTime !== null ? `${stats.avgTime}s` : "—"} />
           </div>
 
           {/* ── Bar Chart ── */}
@@ -803,14 +799,14 @@ export default function Dashboard() {
           {/* ── Transaction Log ── */}
           <div className="bg-card border border-card-border rounded-xl shadow-sm overflow-hidden">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-              <h2 className="font-bold text-base">Live Transaction Log</h2>
-              <span className="text-xs text-muted-foreground">{transactions.length} entries</span>
+              <h2 className="font-bold text-base">Completed Transactions</h2>
+              <span className="text-xs text-muted-foreground">{transactions.length} total</span>
             </div>
-            <div className="overflow-x-auto max-h-95 overflow-y-auto">
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10">
                   <tr className="bg-muted/80 backdrop-blur">
-                    {["Timestamp", "Event", "Product", "Payment Status", "Coin Value", "Weight"].map((h) => (
+                    {["Timestamp", "Product", "Price (PHP)", "Inserted (PHP)", "Status", "Reason"].map((h) => (
                       <th key={h} className="text-left px-4 py-2 font-semibold text-muted-foreground text-xs whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -820,29 +816,37 @@ export default function Dashboard() {
                     <tr>
                       <td colSpan={6} className="text-center py-12 text-muted-foreground">
                         <div className="text-3xl mb-2">📡</div>
-                        <div>No transactions yet.</div>
+                        <div>No completed transactions yet.</div>
                         <div className="text-xs mt-1">Connect Arduino, run the demo, or use Manual Entry.</div>
                       </td>
                     </tr>
                   ) : transactions.map((row) => (
-                    <tr key={row.id} className="hover:bg-muted/30 transition-colors">
+                    <tr key={row.id} className={`hover:bg-muted/30 transition-colors ${row.status === "SUCCESS" ? "bg-green-50/5 dark:bg-green-950/10" : "bg-red-50/5 dark:bg-red-950/10"}`}>
                       <td className="px-4 py-2 text-muted-foreground font-mono text-xs whitespace-nowrap">{formatTimestamp(row.timestamp)}</td>
-                      <td className="px-4 py-2"><EventBadge event={row.event} /></td>
                       <td className="px-4 py-2">
-                        {row.product ? <span className="font-semibold text-yellow-700 dark:text-yellow-400 text-xs">{row.product}</span>
-                          : <span className="text-muted-foreground">—</span>}
+                        <span className="font-semibold text-yellow-700 dark:text-yellow-400 text-xs">{row.product}</span>
                       </td>
-                      <td className="px-4 py-2"><StatusBadge status={row.paymentStatus} /></td>
+                      <td className="px-4 py-2 font-mono font-semibold">PHP {row.price}</td>
+                      <td className="px-4 py-2 font-mono font-semibold">PHP {row.inserted}</td>
                       <td className="px-4 py-2">
-                        {extractCoinValue(row) ? (
-                          <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800 dark:bg-sky-900/60 dark:text-sky-200">
-                            {extractCoinValue(row)}
-                          </span>
-                        ) : <span className="text-muted-foreground">—</span>}
+                        <span className={`px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${
+                          row.status === "SUCCESS"
+                            ? "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200"
+                            : "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200"
+                        }`}>
+                          {row.status}
+                        </span>
                       </td>
                       <td className="px-4 py-2">
-                        {row.weight ? <span className="font-mono text-xs">{row.weight}</span>
-                          : <span className="text-muted-foreground">—</span>}
+                        <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                          row.reason === "VALID"
+                            ? "bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300"
+                            : row.reason === "INSUFFICIENT"
+                            ? "bg-yellow-50 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300"
+                            : "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                        }`}>
+                          {row.reason}
+                        </span>
                       </td>
                     </tr>
                   ))}

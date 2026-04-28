@@ -1,13 +1,20 @@
 import type { LcdState } from "./serial";
 
+/**
+ * ONE transaction per completed payment attempt (consolidated from multiple serial events).
+ * - status: "SUCCESS" if inserted === price, "FAILED" otherwise
+ * - reason: "VALID" (success), "INSUFFICIENT" (underpaid), "INVALID" (overpaid/wrong coin)
+ */
 export interface TransactionRow {
   id: string;
   timestamp: string;
-  event: string;
-  product: string | null;
-  paymentStatus: string | null;
-  weight: string | null;
-  rawLine: string | null;
+  product: string; // "Product One (PHP5)" or "Product Two (PHP10)"
+  price: number;   // PHP amount required
+  inserted: number; // total PHP inserted (sum of all coins)
+  weight: number;  // total weight of coins inserted
+  status: "SUCCESS" | "FAILED"; // final outcome
+  reason: "VALID" | "INSUFFICIENT" | "INVALID"; // reason for status
+  rawLine: string | null; // original serial line for debugging
 }
 
 export interface PirCounter {
@@ -126,16 +133,17 @@ export function computePirFromTransactions(rows: TransactionRow[]): number {
 // ── CSV Export ────────────────────────────────────────────────────────────
 
 export function exportCsv(rows: TransactionRow[]): void {
-  const header = "Timestamp,Event,Product,Payment Status,Weight,Raw Line\n";
+  const header = "Timestamp,Product,Price (PHP),Inserted (PHP),Weight (g),Status,Reason\n";
   const body = rows
     .map((r) => {
       const cols = [
         r.timestamp,
-        r.event,
-        r.product ?? "",
-        r.paymentStatus ?? "",
-        r.weight ?? "",
-        r.rawLine ?? "",
+        r.product,
+        String(r.price),
+        String(r.inserted),
+        String(r.weight.toFixed(2)),
+        r.status,
+        r.reason,
       ].map((c) => `"${String(c).replace(/"/g, '""')}"`);
       return cols.join(",");
     })
@@ -145,7 +153,7 @@ export function exportCsv(rows: TransactionRow[]): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `smartpay_export_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `honestpay_export_${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -160,93 +168,23 @@ export function computeStats(rows: TransactionRow[]) {
   const todayCount = todayRows.length;
 
   let totalRevenue = 0;
-  let verifiedCount = 0;
-  let insufficientCount = 0;
-  let currentState = "Ready";
+  let successCount = 0;
+  let failureCount = 0;
 
-  // Track timing for avg transaction time
-  const completedTimes: number[] = [];
-  let entryTime: number | null = null;
-
-  const sorted = [...todayRows].sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-  );
-
-  // Carry the last known product price across rows so "Payment OK" (which has no product)
-  // can still count revenue against the preceding "Product Removed" row.
-  let lastKnownProduct: string | null = null;
-
-  for (const row of sorted) {
-    const ev = row.event.toLowerCase();
-    const paymentStatus = (row.paymentStatus ?? "").toLowerCase();
-    const ts = new Date(row.timestamp).getTime();
-
-    // Remember the product price from "Product Removed" / pay-prompt rows
-    if (row.product) lastKnownProduct = row.product;
-
-    // Reset product tracking when a new customer session starts
-    if (ev === "entry" || ev === "smartpay ready" || ev === "customer left") {
-      if (ev === "entry") entryTime = ts;
-      if (ev !== "entry") lastKnownProduct = null;
-    }
-
-    if ((ev === "payment ok" || ev === "customer left") && entryTime !== null) {
-      completedTimes.push((ts - entryTime) / 1000);
-      entryTime = null;
-    }
-
-    // Only count explicit payment outcome events for success metrics.
-    if (ev === "payment ok" || paymentStatus === "verified") {
-      // Use product from this row OR the last seen product from the same session
-      const productStr = row.product ?? lastKnownProduct;
-      const match = productStr?.match(/PHP(\d+)/i);
-      if (match) totalRevenue += parseInt(match[1], 10);
-      verifiedCount++;
-      lastKnownProduct = null; // consumed
-    } else if (
-      ev === "payment incomplete" ||
-      ev === "add more coins" ||
-      ev.includes("invalid coin") ||
-      paymentStatus === "insufficient"
-    ) {
-      insufficientCount++;
-      // Don't clear lastKnownProduct — next attempt (if any) is for same product
+  for (const row of todayRows) {
+    if (row.status === "SUCCESS") {
+      successCount++;
+      totalRevenue += row.price;
+    } else if (row.status === "FAILED") {
+      failureCount++;
     }
   }
 
-  // Success rate = verified / (verified + insufficient coin attempts)
-  const totalPaymentAttempts = verifiedCount + insufficientCount;
+  const totalAttempts = successCount + failureCount;
   const successRate =
-    totalPaymentAttempts > 0
-      ? Math.round((verifiedCount / totalPaymentAttempts) * 100)
-      : null; // null = no data yet
+    totalAttempts > 0 ? Math.round((successCount / totalAttempts) * 100) : null;
 
-  const avgTime =
-    completedTimes.length > 0
-      ? Math.round(completedTimes.reduce((a, b) => a + b, 0) / completedTimes.length)
-      : null;
-
-  const latestRow = sorted[sorted.length - 1];
-  if (latestRow) {
-    const ev = latestRow.event.toLowerCase();
-    if (
-      ev === "entry" ||
-      ev.includes("product removed") ||
-      ev.includes("payment") ||
-      ev.includes("customer entered") ||
-      ev.startsWith("pay ") ||
-      ev.includes("coin detected") ||
-      ev.includes("inserted balance") ||
-      ev.includes("remaining balance") ||
-      ev.includes("dispensing product") ||
-      ev.includes("add more")
-    ) {
-      currentState = "Customer Present";
-    } else if (ev === "customer left" || ev === "smartpay ready") {
-      currentState = "Ready";
-    }
-  }
-
+  // Hourly breakdown: count one transaction per hour it occurred
   const currentHour = new Date().getHours();
   const hourlyCounts: Record<string, number> = {};
   for (let h = Math.max(0, currentHour - 11); h <= currentHour; h++) {
@@ -257,17 +195,75 @@ export function computeStats(rows: TransactionRow[]) {
     const label = `${String(h).padStart(2, "0")}:00`;
     if (label in hourlyCounts) hourlyCounts[label]++;
   }
-  const hourlyData = Object.entries(hourlyCounts).map(([hour, count]) => ({ hour, count }));
+  const hourlyData = Object.entries(hourlyCounts).map(([hour, count]) => ({
+    hour,
+    count,
+  }));
+
+  // Current state: "Ready" if no transactions or last was successful, "Customer Present" if last failed
+  let currentState = "Ready";
+  if (todayRows.length > 0) {
+    const last = todayRows[todayRows.length - 1];
+    currentState = last.status === "FAILED" ? "Payment Failed" : "Ready";
+  }
 
   return {
     todayCount,
     totalRevenue,
-    successRate,           // number (0–100) or null when no payment attempts yet
-    verifiedCount,
-    insufficientCount,
-    totalPaymentAttempts,
+    successRate,
+    successCount,
+    failureCount,
+    totalAttempts,
     currentState,
     hourlyData,
-    avgTime,
+  };
+}
+
+// ── Transaction Consolidation ─────────────────────────────────────────
+
+/**
+ * Runtime state to build up a transaction from multiple serial events.
+ * When payment completes (Payment OK or Add More Coins), finalize into TransactionRow.
+ */
+export interface OngoingTransaction {
+  product: string | null;
+  price: number | null;
+  insertedCoins: number;
+  totalWeight: number;
+  startTime: number;
+}
+
+/**
+ * Finalize an ongoing transaction into a completed TransactionRow.
+ * Returns null if transaction data is incomplete.
+ */
+export function finalizeTransaction(
+  ongoing: OngoingTransaction | null,
+  timestamp: string
+): TransactionRow | null {
+  if (!ongoing || !ongoing.product || ongoing.price === null) return null;
+
+  const status: "SUCCESS" | "FAILED" = 
+    ongoing.insertedCoins === ongoing.price ? "SUCCESS" : "FAILED";
+  
+  let reason: "VALID" | "INSUFFICIENT" | "INVALID";
+  if (status === "SUCCESS") {
+    reason = "VALID";
+  } else if (ongoing.insertedCoins < ongoing.price) {
+    reason = "INSUFFICIENT";
+  } else {
+    reason = "INVALID";
+  }
+
+  return {
+    id: `tx-${Date.now()}-${Math.random()}`,
+    timestamp,
+    product: ongoing.product,
+    price: ongoing.price,
+    inserted: ongoing.insertedCoins,
+    weight: ongoing.totalWeight,
+    status,
+    reason,
+    rawLine: null,
   };
 }

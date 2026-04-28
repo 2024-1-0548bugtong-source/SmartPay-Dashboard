@@ -21,7 +21,8 @@ reconnect-smartpay.bat
 If you prefer typing the command yourself:
 
 ```bat
-cd /d D:\Users\user\Downloads\SmartPay-Dashboard npm run bridge:vercel -- COM5 https://smartpay-dashboard-two.vercel.app
+cd /d D:\Users\user\Downloads\SmartPay-Dashboard
+npm run bridge:vercel -- COM5 https://honest-pay-dashboard.vercel.app
 ```
 
 ## Change the COM port
@@ -47,7 +48,7 @@ to your actual port, such as `COM7`.
 - If no events arrive, confirm Arduino is sending valid JSON and the baud rate is `9600`.
 
 cd /d D:\Users\user\Downloads\SmartPay-Dashboard
-npm run bridge:vercel -- COM5 https://smartpay-dashboard-two.vercel.app
+npm run bridge:vercel -- COM5 https://honest-pay-dashboard.vercel.app
 
 Restart the Node Server
 ps aux | grep -E "node|npm" | grep -v grep
