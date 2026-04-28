@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <EEPROM.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -335,7 +336,7 @@ void sendMessage(const char* msg) {
 /* ================= PRODUCT DETECTION ================= */
 int detectProduct(float weight) {
   if (weight > 330 && weight < 400) return 1; // ~200g
-  if (weight > 650 && weight < 750) return 2; // ~400g
+  if (weight > 400 && weight < 500) return 2; // observed ~415g
   return 0; // no product / unknown
 }
 

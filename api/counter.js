@@ -1,8 +1,8 @@
 function getStore() {
-  if (!globalThis.__smartpayTransactions) {
-    globalThis.__smartpayTransactions = [];
+  if (!globalThis.__honestpayTransactions) {
+    globalThis.__honestpayTransactions = [];
   }
-  return globalThis.__smartpayTransactions;
+  return globalThis.__honestpayTransactions;
 }
 
 function sendJson(res, status, payload) {

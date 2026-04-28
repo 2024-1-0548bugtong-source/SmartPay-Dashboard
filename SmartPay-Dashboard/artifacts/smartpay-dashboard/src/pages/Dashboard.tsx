@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
-  saveTransactions, loadDarkMode, saveDarkMode,
+  loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
   exportCsv, computeStats, type TransactionRow,
 } from "@/lib/storage";
 import { PRODUCT_CATALOG, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
@@ -312,7 +312,7 @@ function normalizeCompletedApiRows(
 
 export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(loadDarkMode);
-  const [transactions, setTransactions] = useState<TransactionRow[]>([]);
+  const [transactions, setTransactions] = useState<TransactionRow[]>(() => loadTransactions());
   const [localPirCount, setLocalPirCount] = useState(0);
   const [livePirCount, setLivePirCount] = useState<number | null>(null);
   const [counterStatus, setCounterStatus] = useState("loading");
@@ -338,15 +338,6 @@ export default function Dashboard() {
     document.documentElement.classList.toggle("dark", darkMode);
     saveDarkMode(darkMode);
   }, [darkMode]);
-
-  // ── Clear transaction logs on startup (fresh start) ──
-  useEffect(() => {
-    localStorage.removeItem("smartpay_transactions");
-    setTransactions([]);
-    setLocalPirCount(0);
-    ongoingTransactionRef.current = null;
-    console.log("[STARTUP] Transaction logs cleared");
-  }, []);
 
   // ── Persist transactions ──
   useEffect(() => { saveTransactions(transactions); }, [transactions]);
@@ -431,20 +422,6 @@ export default function Dashboard() {
       console.debug("Failed to fetch transactions:", err);
     }
   }, []);
-
-  useEffect(() => {
-    const resetTransactions = async () => {
-      try {
-        await fetch("/api/transactions", { method: "DELETE" });
-      } catch (err) {
-        console.debug("Failed to clear transactions on startup:", err);
-      }
-    };
-
-    resetTransactions().finally(() => {
-      fetchTransactions();
-    });
-  }, [fetchTransactions]);
 
   useEffect(() => {
     fetchTransactions();
