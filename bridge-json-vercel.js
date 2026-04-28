@@ -34,9 +34,64 @@ function formatProductLabel(token) {
   return value;
 }
 
+function formatTransactionProduct(rawProduct) {
+  const value = String(rawProduct || "").trim();
+  if (!value) return null;
+
+  if (/^p1$/i.test(value)) return "P1";
+  if (/^p2$/i.test(value)) return "P2";
+
+  const compact = value.toUpperCase().replace(/\s+/g, "");
+  if (compact.includes("PRODUCTONE") || compact.includes("PHP5") || compact === "1") return "P1";
+  if (compact.includes("PRODUCTTWO") || compact.includes("PHP10") || compact === "2") return "P2";
+
+  return null;
+}
+
+function parseTransactionLine(rawLine) {
+  const raw = String(rawLine || "").trim();
+  if (!raw) return null;
+
+  const successMatch = raw.match(/^transaction:success:([^:]+):php(\d+)$/i);
+  if (successMatch) {
+    return {
+      kind: "transaction",
+      status: "SUCCESS",
+      product: formatTransactionProduct(successMatch[1]),
+      price: Number(successMatch[2]),
+      inserted: Number(successMatch[2]),
+      weight: null,
+      reason: "VALID",
+      rawLine: raw,
+    };
+  }
+
+  const failedMatch = raw.match(/^transaction:failed:([^:]+):([a-z]+)$/i);
+  if (failedMatch) {
+    const reason = failedMatch[2].toUpperCase();
+    return {
+      kind: "transaction",
+      status: "FAILED",
+      product: formatTransactionProduct(failedMatch[1]),
+      price: failedMatch[1].toUpperCase().includes("PHP10") ? 10 : 5,
+      inserted: 0,
+      weight: null,
+      reason: reason === "INVALID" || reason === "INSUFFICIENT" ? reason : "INVALID",
+      rawLine: raw,
+    };
+  }
+
+  return null;
+}
+
 function parseSmartPayLine(rawLine) {
   const raw = String(rawLine || "").trim();
   if (!raw) return null;
+
+  const transaction = parseTransactionLine(raw);
+  if (transaction) {
+    return transaction;
+  }
 
   if (raw.startsWith("{")) {
     try {
@@ -45,6 +100,7 @@ function parseSmartPayLine(rawLine) {
       if (!event) return null;
 
       return {
+        kind: "event",
         event: parsed.event,
         product: typeof parsed.product === "string" ? parsed.product : null,
         paymentStatus: typeof parsed.paymentStatus === "string" ? parsed.paymentStatus : null,
@@ -62,17 +118,18 @@ function parseSmartPayLine(rawLine) {
 
   const entryMatch = raw.match(/^entry:\s*(\d+)/i);
   if (entryMatch) {
-    return { event: "Entry", product: null, paymentStatus: null, weight: null, rawLine: raw };
+    return { kind: "event", event: "Entry", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   if (/^customer entered\b/i.test(raw)) {
-    return { event: "Customer Entered", product: null, paymentStatus: null, weight: null, rawLine: raw };
+    return { kind: "event", event: "Customer Entered", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   const productRemovedMatch = raw.match(/^product removed\.?\s*pay\s*(.+)$/i);
   if (productRemovedMatch) {
     const product = formatProductLabel(productRemovedMatch[1]);
     return {
+      kind: "event",
       event: "Product Removed",
       product,
       paymentStatus: null,
@@ -85,6 +142,7 @@ function parseSmartPayLine(rawLine) {
   if (payPromptMatch) {
     const product = formatProductLabel(payPromptMatch[1]);
     return {
+      kind: "event",
       event: product ? `Pay ${product}` : "Pay",
       product,
       paymentStatus: null,
@@ -96,6 +154,7 @@ function parseSmartPayLine(rawLine) {
   const coinDetectedMatch = raw.match(/^coin detected:\s*([\d.]+)g\s*->\s*php(5|10)\s*accepted$/i);
   if (coinDetectedMatch) {
     return {
+      kind: "event",
       event: "Coin Detected",
       product: coinDetectedMatch[2] === "5" ? "Product One (PHP5)" : "Product Two (PHP10)",
       paymentStatus: "Verified",
@@ -107,6 +166,7 @@ function parseSmartPayLine(rawLine) {
   const insertedMatch = raw.match(/^inserted:\s*php(\d+)$/i);
   if (insertedMatch) {
     return {
+      kind: "event",
       event: "Inserted Balance",
       product: null,
       paymentStatus: null,
@@ -118,6 +178,7 @@ function parseSmartPayLine(rawLine) {
   const remainingMatch = raw.match(/^remaining:\s*php(\d+)$/i);
   if (remainingMatch) {
     return {
+      kind: "event",
       event: "Remaining Balance",
       product: null,
       paymentStatus: null,
@@ -127,23 +188,23 @@ function parseSmartPayLine(rawLine) {
   }
 
   if (/^dispensing product\.?$/i.test(raw)) {
-    return { event: "Dispensing Product", product: null, paymentStatus: null, weight: null, rawLine: raw };
+    return { kind: "event", event: "Dispensing Product", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   if (/^payment ok$/i.test(raw)) {
-    return { event: "Payment OK", product: null, paymentStatus: "Verified", weight: null, rawLine: raw };
+    return { kind: "event", event: "Payment OK", product: null, paymentStatus: "Verified", weight: null, rawLine: raw };
   }
 
   if (/^add more coins$/i.test(raw)) {
-    return { event: "Add More Coins", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+    return { kind: "event", event: "Add More Coins", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
   }
 
   if (/^customer left$/i.test(raw)) {
-    return { event: "Customer Left", product: null, paymentStatus: null, weight: null, rawLine: raw };
+    return { kind: "event", event: "Customer Left", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   if (/^(smartpay|honestpay) ready$/i.test(raw)) {
-    return { event: "HonestPay Ready", product: null, paymentStatus: null, weight: null, rawLine: raw };
+    return { kind: "event", event: "HonestPay Ready", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   return null;
@@ -223,34 +284,46 @@ function start() {
 
     // Keep only "Entry" as the persisted PIR event to avoid double counting
     // from paired "Entry" + "Customer Entered" Arduino lines.
-    if (isPirEventName(eventName) && !isEntryOnlyPirEvent(eventName)) {
+    if (parsed.kind === "event" && isPirEventName(eventName) && !isEntryOnlyPirEvent(eventName)) {
       console.warn(`[SKIP] Non-entry PIR event: ${eventName}`);
       return;
     }
 
     const now = Date.now();
-    if (isPirEventName(eventName)) {
+    if (parsed.kind === "event" && isPirEventName(eventName)) {
       if (shouldDropPirDuplicate(now)) {
         console.warn(`[SKIP] Duplicate PIR event within dedupe window: ${eventName}`);
         return;
       }
-    } else if (shouldDropDuplicate(now)) {
+    } else if (parsed.kind === "event" && shouldDropDuplicate(now)) {
       console.warn(`[SKIP] Duplicate event within dedupe window: ${eventName}`);
       return;
     }
 
-    const payload = {
-      timestamp: new Date().toISOString(),
-      event: parsed.event,
-      product: parsed.product,
-      paymentStatus: parsed.paymentStatus,
-      weight: parsed.weight,
-      rawLine: parsed.rawLine,
-    };
+    const payload =
+      parsed.kind === "transaction"
+        ? {
+            timestamp: new Date().toISOString(),
+            product: parsed.product,
+            price: parsed.price,
+            inserted: parsed.inserted,
+            weight: parsed.weight,
+            status: parsed.status,
+            reason: parsed.reason,
+            rawLine: parsed.rawLine,
+          }
+        : {
+            timestamp: new Date().toISOString(),
+            event: parsed.event,
+            product: parsed.product,
+            paymentStatus: parsed.paymentStatus,
+            weight: parsed.weight,
+            rawLine: parsed.rawLine,
+          };
 
     try {
       await postToVercel(payload);
-      console.log(`[SENT] ${eventName}`);
+      console.log(`[SENT] ${parsed.kind}:${eventName}`);
     } catch (err) {
       console.error(`[POST ERROR] ${err.message}`);
     }
