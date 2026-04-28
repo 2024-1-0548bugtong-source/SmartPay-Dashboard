@@ -255,6 +255,69 @@ function formatTimestamp(ts: string) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+type TransactionsApiMode = "raw-events" | "completed-transactions";
+
+function defaultTransactionsApiMode(): TransactionsApiMode {
+  if (typeof window === "undefined") return "completed-transactions";
+
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1"
+    ? "raw-events"
+    : "completed-transactions";
+}
+
+function parseApiWeight(weight: string | number | null | undefined): number {
+  if (typeof weight === "number") return Number.isFinite(weight) ? weight : 0;
+  if (typeof weight !== "string") return 0;
+
+  const parsed = parseFloat(weight);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeCompletedApiRows(
+  rows: Array<{
+    id: number | string;
+    timestamp: string;
+    product?: string | null;
+    price?: number | string | null;
+    inserted?: number | string | null;
+    weight?: string | number | null;
+    status?: string | null;
+    reason?: string | null;
+    rawLine?: string | null;
+  }>
+): TransactionRow[] {
+  return rows
+    .map((row) => {
+      const product = typeof row.product === "string" ? row.product : null;
+      const status = row.status === "SUCCESS" || row.status === "FAILED" ? row.status : null;
+      const reason =
+        row.reason === "VALID" || row.reason === "INSUFFICIENT" || row.reason === "INVALID"
+          ? row.reason
+          : null;
+      const price = Number(row.price);
+      const inserted = Number(row.inserted ?? row.price);
+
+      if (!product || !status || !reason || !Number.isFinite(price)) {
+        return null;
+      }
+
+      return {
+        id: String(row.id),
+        timestamp: row.timestamp,
+        product,
+        price,
+        inserted: Number.isFinite(inserted) ? inserted : price,
+        weight: parseApiWeight(row.weight),
+        status,
+        reason,
+        rawLine: row.rawLine ?? null,
+      } satisfies TransactionRow;
+    })
+    .filter((row): row is TransactionRow => row !== null)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
 // ── Main Dashboard ────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -275,6 +338,7 @@ export default function Dashboard() {
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const ongoingTransactionRef = useRef<TransactionDraft | null>(null);
+  const transactionsApiModeRef = useRef<TransactionsApiMode>(defaultTransactionsApiMode());
 
   const sm = useStateMachine();
   const effectiveLcdState = serialLcdState ?? sm.lcdState;
@@ -341,27 +405,38 @@ export default function Dashboard() {
     try {
       const r = await fetch("/api/transactions");
       const apiRows: Array<{
-        id: number; timestamp: string; event: string;
+        id: number | string; timestamp: string; event?: string | null;
         product?: string | null; paymentStatus?: string | null;
-        weight?: string | null; rawLine?: string | null;
+        weight?: string | number | null; rawLine?: string | null;
+        price?: number | string | null; inserted?: number | string | null;
+        status?: string | null; reason?: string | null;
       }> = await r.json();
 
       if (!Array.isArray(apiRows)) return;
 
       const rawRows: RawTransactionEvent[] = apiRows
+        .filter((row) => typeof row.event === "string" && row.event.trim().length > 0)
         .map((r) => ({
           id: String(r.id),
           timestamp: r.timestamp,
-          event: r.event,
+          event: r.event ?? null,
           product: r.product ?? null,
           paymentStatus: r.paymentStatus ?? null,
-          weight: r.weight ?? null,
+          weight: typeof r.weight === "number" ? String(r.weight) : (r.weight ?? null),
           rawLine: r.rawLine ?? null,
         }))
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-      setTransactions((prev) => mergeCompletedTransactions(prev, buildCompletedTransactionsFromEvents(rawRows)));
-      setLocalPirCount(countPirEntries(rawRows));
+      const completedRows = normalizeCompletedApiRows(apiRows);
+
+      if (rawRows.length > 0) {
+        transactionsApiModeRef.current = "raw-events";
+      } else if (completedRows.length > 0) {
+        transactionsApiModeRef.current = "completed-transactions";
+      }
+
+      setTransactions(mergeCompletedTransactions(completedRows, buildCompletedTransactionsFromEvents(rawRows)));
+      setLocalPirCount(rawRows.length > 0 ? countPirEntries(rawRows) : 0);
     } catch (err) {
       console.debug("Failed to fetch transactions:", err);
     }
@@ -419,7 +494,7 @@ export default function Dashboard() {
       setTimeout(() => setRecentPirFlash(false), 1500);
     }
 
-    if (parsed.isLogEntry) {
+    if (parsed.isLogEntry && transactionsApiModeRef.current === "raw-events") {
       fetch("/api/transactions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -447,6 +522,25 @@ export default function Dashboard() {
 
     if (next.completed) {
       setTransactions((prev) => mergeCompletedTransactions(prev, [next.completed!]));
+
+      if (transactionsApiModeRef.current === "completed-transactions") {
+        fetch("/api/transactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            timestamp: next.completed.timestamp,
+            product: next.completed.product,
+            price: next.completed.price,
+            inserted: next.completed.inserted,
+            weight: next.completed.weight,
+            status: next.completed.status,
+            reason: next.completed.reason,
+            rawLine: next.completed.rawLine,
+          }),
+        }).catch((err) => {
+          console.debug("Failed to persist completed transaction:", err);
+        });
+      }
     }
   }, [sm]);
 

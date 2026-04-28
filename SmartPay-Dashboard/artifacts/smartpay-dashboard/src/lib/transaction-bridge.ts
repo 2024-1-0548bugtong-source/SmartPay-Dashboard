@@ -3,7 +3,7 @@ import type { TransactionRow } from "./storage";
 export interface RawTransactionEvent {
   id: string;
   timestamp: string;
-  event: string;
+  event: string | null;
   product: string | null;
   paymentStatus: string | null;
   weight: string | null;
@@ -69,7 +69,11 @@ export function applyRawEventToTransaction(
   draft: TransactionDraft | null,
   row: Pick<RawTransactionEvent, "timestamp" | "event" | "product" | "weight">
 ): { draft: TransactionDraft | null; completed: TransactionRow | null } {
-  const evLower = row.event.toLowerCase();
+  const evLower = row.event?.toLowerCase();
+  if (!evLower) {
+    return { draft, completed: null };
+  }
+
   let nextDraft = draft;
 
   if (evLower.includes("product removed") && row.product) {
@@ -190,7 +194,7 @@ export function countPirEntries(rows: RawTransactionEvent[]): number {
   today.setHours(0, 0, 0, 0);
 
   const entryRows = rows
-    .filter((row) => row.event.toLowerCase() === "entry" && new Date(row.timestamp) >= today)
+    .filter((row) => row.event?.toLowerCase() === "entry" && new Date(row.timestamp) >= today)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
   let count = 0;
