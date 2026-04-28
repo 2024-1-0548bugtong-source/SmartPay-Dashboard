@@ -98,7 +98,7 @@ function normalizeEventName(event: string): string {
   const ev = event.trim().toLowerCase();
   if (ev === "customer_entered" || ev === "customer entered") return "Customer Entered";
   if (ev === "customer_left" || ev === "customer left") return "Customer Left";
-  if (ev === "smartpay ready" || ev === "ready") return "SmartPay Ready";
+  if (ev === "smartpay ready" || ev === "honestpay ready" || ev === "ready") return "HonestPay Ready";
   if (ev === "payment ok" || ev === "payment_success" || ev === "payment success") return "Payment OK";
   if (ev === "payment incomplete" || ev === "payment_fail" || ev === "payment failed") return "Payment Incomplete";
   if (ev === "add more coins") return "Add More Coins";
@@ -177,7 +177,7 @@ function parseJsonSerialLine(raw: string): ParsedSerialLine | null {
 
     const normalized = resolvedEvent.toLowerCase();
     const lcdState: LcdState | null = (() => {
-      if (normalized === "smartpay ready") return { line1: lcdPad("** SmartPay **"), line2: lcdPad("    Ready"), theme: "ready" };
+      if (normalized === "honestpay ready" || normalized === "smartpay ready") return { line1: lcdPad("** HonestPay **"), line2: lcdPad("    Ready"), theme: "ready" };
       if (normalized === "customer entered") return { line1: lcdPad("Customer Entered"), line2: lcdPad("  Please wait..."), theme: "entry" };
       if (normalized === "product removed") return { line1: lcdPad("Product Removed"), line2: lcdPad(`  Pay ${product ?? "coins"}`), theme: "payment" };
       if (normalized.startsWith("pay ")) return { line1: lcdPad("Insert Coins:"), line2: lcdPad(`  Please pay ${product?.replace(/^.*\((PHP\d+)\).*$/i, "$1") ?? "coins"}`), theme: "payment" };
@@ -350,17 +350,17 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
 
   // ── LCD-only state lines ──────────────────────────────────────────────
 
-  // "SmartPay Ready"
-  if (/^smartpay ready/i.test(raw)) {
+  // "HonestPay Ready" / legacy "SmartPay Ready"
+  if (/^(smartpay|honestpay) ready/i.test(raw)) {
     return {
-      event: "SmartPay Ready",
+      event: "HonestPay Ready",
       product: null,
       paymentStatus: null,
       weight: null,
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("** SmartPay **"), line2: lcdPad("    Ready"), theme: "ready" },
+      lcdState: { line1: lcdPad("** HonestPay **"), line2: lcdPad("    Ready"), theme: "ready" },
     };
   }
 
@@ -580,7 +580,7 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
       rawLine: raw,
       isLogEntry: true,
       isPirEntry: false,
-      lcdState: { line1: lcdPad("** SmartPay **"), line2: lcdPad("    Ready"), theme: "ready" },
+      lcdState: { line1: lcdPad("** HonestPay **"), line2: lcdPad("    Ready"), theme: "ready" },
     };
   }
 

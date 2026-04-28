@@ -206,13 +206,12 @@ export function computeStats(rows: TransactionRow[]) {
     } else if (
       ev === "payment incomplete" ||
       ev === "add more coins" ||
+      ev.includes("invalid coin") ||
       paymentStatus === "insufficient"
     ) {
       insufficientCount++;
       // Don't clear lastKnownProduct — next attempt (if any) is for same product
     }
-    // Note: "Pending" status is NOT counted as failure - it's just awaiting payment
-    // Only actual failures (insufficient coins, invalid coins) are counted
   }
 
   // Success rate = verified / (verified + insufficient coin attempts)

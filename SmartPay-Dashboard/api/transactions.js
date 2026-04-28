@@ -12,7 +12,7 @@ function sendJson(res, status, payload) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.end(JSON.stringify(payload));
 }
@@ -56,6 +56,11 @@ module.exports = async function handler(req, res) {
 
   if (req.method === "GET") {
     return sendJson(res, 200, store);
+  }
+
+  if (req.method === "DELETE") {
+    store.length = 0;
+    return sendJson(res, 200, { ok: true, cleared: true });
   }
 
   if (req.method === "POST") {

@@ -46,6 +46,11 @@ app.get("/api/transactions", (_req, res) => {
   res.json(transactionStore);
 });
 
+app.delete("/api/transactions", (_req, res) => {
+  transactionStore = [];
+  res.json({ ok: true, cleared: true });
+});
+
 app.post("/api/transactions", (req, res) => {
   try {
     const body = req.body;

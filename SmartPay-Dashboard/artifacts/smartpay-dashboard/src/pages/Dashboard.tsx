@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
-  loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
+  saveTransactions, loadDarkMode, saveDarkMode,
   exportCsv, computeStats, computePirFromTransactions,
   type TransactionRow,
 } from "@/lib/storage";
@@ -289,17 +289,17 @@ function StatusBadge({ status }: { status: string | null }) {
   if (!status) return <span className="text-muted-foreground">—</span>;
   let cls = "px-2 py-0.5 rounded-full text-xs font-semibold ";
   if (status === "Verified") cls += "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200";
-  else if (status === "Pending") cls += "bg-orange-100 text-orange-800 dark:bg-orange-900/60 dark:text-orange-200";
+  else if (status === "Pending") cls += "bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200";
   else if (status === "Insufficient") cls += "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200";
   else cls += "bg-gray-100 text-gray-700";
-  return <span className={cls}>{status}</span>;
+  return <span className={cls}>{status === "Pending" ? "Awaiting Payment" : status}</span>;
 }
 
 // ── Main Dashboard ────────────────────────────────────────────────────────
 
 export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(loadDarkMode);
-  const [transactions, setTransactions] = useState<TransactionRow[]>(loadTransactions);
+  const [transactions, setTransactions] = useState<TransactionRow[]>([]);
   const [livePirCount, setLivePirCount] = useState<number | null>(null);
   const [counterStatus, setCounterStatus] = useState("loading");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
@@ -375,6 +375,14 @@ export default function Dashboard() {
   const { socket, isConnected } = useSocket();
   
   useEffect(() => {
+    const resetTransactions = async () => {
+      try {
+        await fetch("/api/transactions", { method: "DELETE" });
+      } catch (err) {
+        console.debug("Failed to clear transactions on startup:", err);
+      }
+    };
+
     const fetchTransactions = async () => {
       try {
         const r = await fetch("/api/transactions");
@@ -405,8 +413,9 @@ export default function Dashboard() {
       }
     };
 
-    // Fetch immediately on mount
-    fetchTransactions();
+    resetTransactions().finally(() => {
+      fetchTransactions();
+    });
 
     // Set up real-time polling for live updates
     if (isConnected) {
@@ -576,7 +585,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <div className="w-8 h-8 bg-white/15 rounded-lg flex items-center justify-center shrink-0 text-lg">🏪</div>
               <div className="min-w-0">
-                <h1 className="font-bold text-base leading-tight">SmartPay Dashboard</h1>
+                <h1 className="font-bold text-base leading-tight">HonestPay Dashboard</h1>
                 <p className="text-blue-200 text-xs">Honest Store Monitor</p>
               </div>
             </div>
@@ -667,7 +676,7 @@ export default function Dashboard() {
               </div>
               <div className="flex flex-wrap gap-1.5 mt-3">
                 {[
-                  "SmartPay Ready", "Entry: 124", "Customer Entered",
+                  "HonestPay Ready", "Entry: 124", "Customer Entered",
                   `Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`, `Pay ${PRODUCT_CATALOG.PHP5.label}`,
                   `Product Removed. Pay ${PRODUCT_CATALOG.PHP10.label}.`, `Pay ${PRODUCT_CATALOG.PHP10.label}`,
                   "Coin Detected: 7.3g -> PHP5 ACCEPTED", "Coin Detected: 8.8g -> PHP10 ACCEPTED",
@@ -916,15 +925,15 @@ function ArduinoGuide() {
           <div className="bg-muted rounded-lg p-3 font-mono text-xs space-y-0.5">
             {[
               "lcd.clear();",
-              'lcd.print("SmartPay Ready");',
-              'Serial.println("SmartPay Ready");',
+              'lcd.print("HonestPay Ready");',
+              'Serial.println("HonestPay Ready");',
               "delay(500);",
             ].map((l) => <div key={l}>{l}</div>)}
           </div>
           <p className="font-semibold text-foreground mt-3">Full expected serial sequence:</p>
           <div className="bg-muted rounded-lg p-3 font-mono text-xs space-y-1">
             {[
-              ["SmartPay Ready",              "→ blue LCD, reset state"],
+              ["HonestPay Ready",             "→ blue LCD, reset state"],
               ["Entry: 124",                  "→ yellow LCD, PIR +1"],
               ["Customer Entered",            "→ yellow LCD"],
               [`Product Removed. Pay ${PRODUCT_CATALOG.PHP5.label}.`,  "→ orange LCD, log entry"],
