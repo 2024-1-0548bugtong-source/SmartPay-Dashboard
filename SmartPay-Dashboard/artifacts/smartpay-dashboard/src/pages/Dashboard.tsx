@@ -4,10 +4,17 @@ import {
 } from "recharts";
 import {
   saveTransactions, loadDarkMode, saveDarkMode,
-  exportCsv, computeStats, computePirFromTransactions,
-  finalizeTransaction, type TransactionRow, type OngoingTransaction,
+  exportCsv, computeStats, type TransactionRow,
 } from "@/lib/storage";
 import { PRODUCT_CATALOG, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
+import {
+  applyRawEventToTransaction,
+  buildCompletedTransactionsFromEvents,
+  countPirEntries,
+  mergeCompletedTransactions,
+  type RawTransactionEvent,
+  type TransactionDraft,
+} from "@/lib/transaction-bridge";
 import {
   useStateMachine, applyTrigger, eventToTrigger, SM_STATES,
   type SmState,
@@ -253,6 +260,7 @@ function formatTimestamp(ts: string) {
 export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(loadDarkMode);
   const [transactions, setTransactions] = useState<TransactionRow[]>([]);
+  const [localPirCount, setLocalPirCount] = useState(0);
   const [livePirCount, setLivePirCount] = useState<number | null>(null);
   const [counterStatus, setCounterStatus] = useState("loading");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
@@ -262,11 +270,11 @@ export default function Dashboard() {
   const [demoRunning, setDemoRunning] = useState(false);
   const [serialLcdState, setSerialLcdState] = useState<LcdState | null>(null);
   const [serialDebugLines, setSerialDebugLines] = useState<string[]>([]);
-  const [ongoingTransaction, setOngoingTransaction] = useState<OngoingTransaction | null>(null);
 
   const portRef = useRef<SerialPort | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const ongoingTransactionRef = useRef<TransactionDraft | null>(null);
 
   const sm = useStateMachine();
   const effectiveLcdState = serialLcdState ?? sm.lcdState;
@@ -281,6 +289,8 @@ export default function Dashboard() {
   useEffect(() => {
     localStorage.removeItem("smartpay_transactions");
     setTransactions([]);
+    setLocalPirCount(0);
+    ongoingTransactionRef.current = null;
     console.log("[STARTUP] Transaction logs cleared");
   }, []);
 
@@ -288,8 +298,7 @@ export default function Dashboard() {
   useEffect(() => { saveTransactions(transactions); }, [transactions]);
 
   // ── PIR count — derived from today's "Entry" rows in the transaction log ──
-  const pirCount = computePirFromTransactions(transactions);
-  const displayedPirCount = livePirCount ?? pirCount;
+  const displayedPirCount = livePirCount ?? localPirCount;
 
   // ── Live counter from deployed Vercel API ──
   useEffect(() => {
@@ -327,7 +336,37 @@ export default function Dashboard() {
 
   // ── Fetch and poll transactions from API with Socket.io real-time support ──
   const { socket, isConnected } = useSocket();
-  
+
+  const fetchTransactions = useCallback(async () => {
+    try {
+      const r = await fetch("/api/transactions");
+      const apiRows: Array<{
+        id: number; timestamp: string; event: string;
+        product?: string | null; paymentStatus?: string | null;
+        weight?: string | null; rawLine?: string | null;
+      }> = await r.json();
+
+      if (!Array.isArray(apiRows)) return;
+
+      const rawRows: RawTransactionEvent[] = apiRows
+        .map((r) => ({
+          id: String(r.id),
+          timestamp: r.timestamp,
+          event: r.event,
+          product: r.product ?? null,
+          paymentStatus: r.paymentStatus ?? null,
+          weight: r.weight ?? null,
+          rawLine: r.rawLine ?? null,
+        }))
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      setTransactions((prev) => mergeCompletedTransactions(prev, buildCompletedTransactionsFromEvents(rawRows)));
+      setLocalPirCount(countPirEntries(rawRows));
+    } catch (err) {
+      console.debug("Failed to fetch transactions:", err);
+    }
+  }, []);
+
   useEffect(() => {
     const resetTransactions = async () => {
       try {
@@ -337,51 +376,16 @@ export default function Dashboard() {
       }
     };
 
-    const fetchTransactions = async () => {
-      try {
-        const r = await fetch("/api/transactions");
-        const apiRows: Array<{
-          id: number; timestamp: string; event: string;
-          product?: string | null; paymentStatus?: string | null;
-          weight?: string | null; rawLine?: string | null;
-        }> = await r.json();
-        
-        if (!Array.isArray(apiRows)) return;
-
-        const normalized = apiRows
-          .map((r) => ({
-            id: String(r.id),
-            timestamp: r.timestamp,
-            event: r.event,
-            product: r.product ?? null,
-            paymentStatus: r.paymentStatus ?? null,
-            weight: r.weight ?? null,
-            rawLine: r.rawLine ?? null,
-          }))
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-        // Replace local state with API snapshot to avoid duplicate accumulation.
-        setTransactions(normalized);
-      } catch (err) {
-        console.debug("Failed to fetch transactions:", err);
-      }
-    };
-
     resetTransactions().finally(() => {
       fetchTransactions();
     });
+  }, [fetchTransactions]);
 
-    // Set up real-time polling for live updates
-    if (isConnected) {
-      // Poll every 1 second for real-time feel
-      const interval = setInterval(fetchTransactions, 1000);
-      return () => clearInterval(interval);
-    } else {
-      // Fallback polling (should not reach here)
-      const interval = setInterval(fetchTransactions, 3000);
-      return () => clearInterval(interval);
-    }
-  }, [socket]);
+  useEffect(() => {
+    fetchTransactions();
+    const interval = setInterval(fetchTransactions, isConnected ? 1000 : 3000);
+    return () => clearInterval(interval);
+  }, [fetchTransactions, isConnected, socket]);
 
   // ── Core line handler (serial or manual) ──
   const handleLine = useCallback((rawLine: string) => {
@@ -399,6 +403,8 @@ export default function Dashboard() {
 
     sm.ping();
 
+    const eventTimestamp = new Date().toISOString();
+
     // Apply to state machine
     const trigger = eventToTrigger(parsed.event);
     applyTrigger(trigger, sm.state, sm.transition, {
@@ -408,78 +414,41 @@ export default function Dashboard() {
 
     // PIR counter increment
     if (parsed.isPirEntry) {
+      setLocalPirCount((count) => count + 1);
       setRecentPirFlash(true);
       setTimeout(() => setRecentPirFlash(false), 1500);
     }
 
-    // ── Transaction consolidation logic ──
-    const evLower = parsed.event.toLowerCase();
-
-    // "Product Removed" → start new transaction
-    if (evLower.includes("product removed") && parsed.product) {
-      const priceMatch = parsed.product.match(/PHP(\d+)/i);
-      const price = priceMatch ? parseInt(priceMatch[1], 10) : 0;
-      setOngoingTransaction({
-        product: parsed.product,
-        price,
-        insertedCoins: 0,
-        totalWeight: 0,
-        startTime: Date.now(),
+    if (parsed.isLogEntry) {
+      fetch("/api/transactions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          timestamp: eventTimestamp,
+          event: parsed.event,
+          product: parsed.product,
+          paymentStatus: parsed.paymentStatus,
+          weight: parsed.weight,
+          rawLine: parsed.rawLine,
+        }),
+      }).catch((err) => {
+        console.debug("Failed to persist serial event:", err);
       });
     }
 
-    // "Coin Detected" with accepted coin → accumulate
-    if (evLower.includes("coin detected") && parsed.product && ongoingTransaction) {
-      const coinValue = parsed.product.match(/PHP(\d+)/i)?.[1];
-      if (coinValue) {
-        const weight = parsed.weight ? parseFloat(parsed.weight) : 0;
-        setOngoingTransaction((prev) =>
-          prev
-            ? {
-                ...prev,
-                insertedCoins: prev.insertedCoins + parseInt(coinValue, 10),
-                totalWeight: prev.totalWeight + weight,
-              }
-            : null
-        );
-      }
-    }
+    const next = applyRawEventToTransaction(ongoingTransactionRef.current, {
+      timestamp: eventTimestamp,
+      event: parsed.event,
+      product: parsed.product,
+      weight: parsed.weight,
+    });
 
-    // "Payment OK" → finalize as SUCCESS
-    if (evLower === "payment ok" && ongoingTransaction) {
-      const ts = new Date().toISOString();
-      const finalized = finalizeTransaction(ongoingTransaction, ts);
-      if (finalized) {
-        setTransactions((prev) => [finalized, ...prev]);
-        fetch("/api/transactions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(finalized),
-        }).catch(() => {});
-      }
-      setOngoingTransaction(null);
-    }
+    ongoingTransactionRef.current = next.draft;
 
-    // "Add More Coins" → finalize as FAILED (insufficient)
-    if (evLower === "add more coins" && ongoingTransaction) {
-      const ts = new Date().toISOString();
-      const finalized = finalizeTransaction(ongoingTransaction, ts);
-      if (finalized) {
-        setTransactions((prev) => [finalized, ...prev]);
-        fetch("/api/transactions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(finalized),
-        }).catch(() => {});
-      }
-      setOngoingTransaction(null);
+    if (next.completed) {
+      setTransactions((prev) => mergeCompletedTransactions(prev, [next.completed!]));
     }
-
-    // Reset on "HonestPay Ready" or "Customer Left"
-    if (evLower === "honestpay ready" || evLower === "customer left") {
-      setOngoingTransaction(null);
-    }
-  }, [sm, ongoingTransaction]);
+  }, [sm]);
 
   // ── Web Serial ──
   const connectSerial = useCallback(async () => {
@@ -648,7 +617,9 @@ export default function Dashboard() {
                 // Clear local storage and PIR counter
                 localStorage.removeItem('smartpay_transactions');
                 localStorage.removeItem('smartpay_pir_counter');
+                ongoingTransactionRef.current = null;
                 setTransactions([]);
+                setLocalPirCount(0);
                 setLivePirCount(null);
                 console.log('[ACTION] Cleared local and remote transactions');
               }}
@@ -744,7 +715,7 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <div className="flex items-end gap-3">
-                  <span className="text-3xl font-extrabold text-primary dark:text-blue-400">{livePirCount ?? pirCount}</span>
+                  <span className="text-3xl font-extrabold text-primary dark:text-blue-400">{displayedPirCount}</span>
                   <span className="text-sm text-muted-foreground mb-1">current count</span>
                 </div>
                 <div className="mt-2 text-xs text-muted-foreground">

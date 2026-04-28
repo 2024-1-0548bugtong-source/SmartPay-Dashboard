@@ -8,6 +8,7 @@ import type { LcdState } from "./serial";
 export interface TransactionRow {
   id: string;
   timestamp: string;
+  event?: string | null;
   product: string; // "Product One (PHP5)" or "Product Two (PHP10)"
   price: number;   // PHP amount required
   inserted: number; // total PHP inserted (sum of all coins)
@@ -106,7 +107,8 @@ export function computePirFromTransactions(rows: TransactionRow[]): number {
 
   const candidates = rows
     .filter((r) => {
-      const ev = r.event.toLowerCase();
+      const ev = r.event?.toLowerCase();
+      if (!ev) return false;
       const isPirEvent =
         ev === "entry" ||
         ev === "customer entered" ||
