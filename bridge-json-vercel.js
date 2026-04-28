@@ -75,7 +75,7 @@ function parseSmartPayLine(rawLine) {
     return {
       event: "Product Removed",
       product,
-      paymentStatus: product ? "Pending" : null,
+      paymentStatus: null,
       weight: null,
       rawLine: raw,
     };
@@ -87,7 +87,7 @@ function parseSmartPayLine(rawLine) {
     return {
       event: product ? `Pay ${product}` : "Pay",
       product,
-      paymentStatus: "Pending",
+      paymentStatus: null,
       weight: null,
       rawLine: raw,
     };

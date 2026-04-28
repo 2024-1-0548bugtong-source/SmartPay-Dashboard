@@ -208,7 +208,7 @@ export type SerialTrigger =
 /** Map a parsed serial event name to a state machine trigger */
 export function eventToTrigger(event: string): SerialTrigger {
   const ev = event.toLowerCase();
-  if (ev === "smartpay ready") return "READY";
+  if (ev === "smartpay ready" || ev === "honestpay ready") return "READY";
   if (ev === "place item") return "PLACE_ITEM";
   if (ev === "entry") return "ENTRY";
   if (ev === "customer entered") return "CUSTOMER_ENTERED";
