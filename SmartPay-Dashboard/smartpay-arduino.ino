@@ -280,10 +280,14 @@ void loop() {
   Serial.print(" g | ");
   Serial.print("Product Type: ");
   Serial.print(productType);
-  Serial.print(" | Coin Value: ");
+  Serial.print(" | Coin Value Detected: ");
   Serial.print(coinValue);
+  Serial.print(" | Inserted: PHP");
+  Serial.print(insertedAmount);
+  Serial.print(" | Required: PHP");
+  Serial.print(requiredAmount);
   Serial.print(" | Payment: ");
-  Serial.println(paymentOK ? "OK" : "NOT OK");
+  Serial.println(paymentOK ? "✓ OK" : "✗ NOT OK");
 
   updateLCD(productType, productW, coinValue, paymentOK, invalidCoinState);
 
