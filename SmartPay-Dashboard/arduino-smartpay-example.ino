@@ -80,8 +80,8 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
-
-  digitalWrite(BUZZER_PIN, LOW);
+    sendMessage("HonestPay Ready");
+    lcd.print("HonestPay Ready");
 
   delay(1000); // let sensor stabilize
 
