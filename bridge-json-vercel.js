@@ -20,6 +20,7 @@ const ALLOW_EVENT_POSTS = process.env.ALLOW_EVENT_POSTS === "true";
  *   inserted: number,
  *   weight: number,
  *   failureReason: Exclude<TransactionReason, "VALID"> | null,
+ *   attemptedCoinValue: number | null,
  *   pendingCoinValue: number | null,
  *   startedAtMs: number,
  *   lastActivityAtMs: number,
@@ -72,10 +73,38 @@ let lastKnownInserted = null;
 /** @type {OngoingTransaction | null} */
 let ongoingTransaction = null;
 
+const verboseTelemetryRuntime = {
+  lastCoinValue: 0,
+  lastProductType: 0,
+};
+
 /** @param {unknown} value */
 function normalizeEvent(value) {
   if (typeof value !== "string") return "";
   return value.trim().toLowerCase();
+}
+
+/** @param {unknown} value */
+function unwrapRawLine(value) {
+  if (typeof value !== "string") return "";
+
+  let raw = value.trim();
+  if (!raw) return "";
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!raw.startsWith("{")) break;
+
+    try {
+      const parsed = JSON.parse(raw);
+      const nestedRaw = typeof parsed?.rawLine === "string" ? parsed.rawLine.trim() : "";
+      if (!nestedRaw || nestedRaw === raw) break;
+      raw = nestedRaw;
+    } catch {
+      break;
+    }
+  }
+
+  return raw;
 }
 
 /** @param {unknown} token */
@@ -137,14 +166,21 @@ function parseWeightValue(rawWeight) {
  * @returns {number | null}
  */
 function parseInsertedAmount(rawLine, product) {
-  const insertedMatch = rawLine.match(/inserted:\s*php(\d+)/i);
+  const normalizedRaw = unwrapRawLine(rawLine);
+
+  const insertedMatch = normalizedRaw.match(/inserted:\s*php(\d+)/i);
   if (insertedMatch) {
     return Number.parseInt(insertedMatch[1], 10);
   }
 
-  const contractInsertMatch = rawLine.match(/coin\s*:\s*(5|10)\s*pesos/i);
+  const contractInsertMatch = normalizedRaw.match(/coin\s*:\s*(5|10)\s*pesos/i);
   if (contractInsertMatch) {
     return Number.parseInt(contractInsertMatch[1], 10);
+  }
+
+  const telemetryCoinValueMatch = normalizedRaw.match(/coin\s+value:\s*(5|10)\b/i);
+  if (telemetryCoinValueMatch) {
+    return Number.parseInt(telemetryCoinValueMatch[1], 10);
   }
 
   return inferPriceFromProduct(product);
@@ -157,12 +193,27 @@ function parseInsertedAmount(rawLine, product) {
  * @returns {number | null}
  */
 function parseInsertedExplicit(rawLine) {
-  if (!rawLine) return null;
-  const insertedMatch = String(rawLine).match(/inserted:\s*php(\d+)/i);
+  const normalizedRaw = unwrapRawLine(rawLine);
+  if (!normalizedRaw) return null;
+
+  const insertedMatch = normalizedRaw.match(/inserted:\s*php(\d+)/i);
   if (insertedMatch) return Number.parseInt(insertedMatch[1], 10);
-  const contractInsertMatch = String(rawLine).match(/coin\s*:\s*(5|10)\s*pesos/i);
+  const contractInsertMatch = normalizedRaw.match(/coin\s*:\s*(5|10)\s*pesos/i);
   if (contractInsertMatch) return Number.parseInt(contractInsertMatch[1], 10);
+  const telemetryCoinValueMatch = normalizedRaw.match(/coin\s+value:\s*(5|10)\b/i);
+  if (telemetryCoinValueMatch) return Number.parseInt(telemetryCoinValueMatch[1], 10);
   return null;
+}
+
+/** @param {OngoingTransaction} transaction */
+function deriveFailedReason(transaction) {
+  const decisionAmount = transaction.attemptedCoinValue ?? transaction.inserted;
+
+  if (decisionAmount > transaction.price) return "INVALID";
+  if (decisionAmount < transaction.price) return "INSUFFICIENT";
+
+  if (transaction.failureReason) return transaction.failureReason;
+  return transaction.inserted > transaction.price ? "INVALID" : "INSUFFICIENT";
 }
 
 /**
@@ -220,6 +271,7 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
         inserted: 0,
         weight: 0,
         failureReason: null,
+        attemptedCoinValue: null,
         pendingCoinValue: null,
         startedAtMs: nowMs,
         lastActivityAtMs: nowMs,
@@ -237,6 +289,7 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
         ongoingTransaction.inserted += coinValue;
       }
       ongoingTransaction.weight += parseWeightValue(parsed.weight);
+      ongoingTransaction.attemptedCoinValue = coinValue;
       ongoingTransaction.pendingCoinValue = ongoingTransaction.pendingCoinValue === coinValue ? null : coinValue;
       ongoingTransaction.lastActivityAtMs = nowMs;
     }
@@ -250,6 +303,7 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
       if (!isDuplicateOfDetectedCoin) {
         ongoingTransaction.inserted += insertedAmount;
       }
+      ongoingTransaction.attemptedCoinValue = insertedAmount;
       ongoingTransaction.pendingCoinValue = isDuplicateOfDetectedCoin ? null : insertedAmount;
       ongoingTransaction.lastActivityAtMs = nowMs;
     }
@@ -258,12 +312,10 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
 
   if (eventName === "invalid coin") {
     const paymentStatus = normalizeEvent(parsed.paymentStatus);
-    ongoingTransaction.failureReason =
-      paymentStatus === "no coin detected" || /payment invalid|invalid coin/i.test(parsed.rawLine)
-        ? "INVALID"
-        : "INSUFFICIENT";
+    const normalizedRawLine = unwrapRawLine(parsed.rawLine);
+    ongoingTransaction.failureReason = deriveFailedReason(ongoingTransaction);
 
-    if (paymentStatus === "no coin detected" || paymentStatus === "insufficient" || /payment invalid|payment incomplete|add more coins/i.test(parsed.rawLine)) {
+    if (paymentStatus === "no coin detected" || paymentStatus === "insufficient" || /payment invalid|payment incomplete|add more coins/i.test(normalizedRawLine)) {
       return buildTransactionPayload({
         status: "FAILED",
         reason: ongoingTransaction.failureReason,
@@ -278,7 +330,7 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
 
   if (eventName === "payment incomplete" || eventName === "add more coins") {
     if (!ongoingTransaction.failureReason) {
-      ongoingTransaction.failureReason = "INSUFFICIENT";
+      ongoingTransaction.failureReason = deriveFailedReason(ongoingTransaction);
     }
     ongoingTransaction.lastActivityAtMs = nowMs;
     return null;
@@ -299,7 +351,7 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
       return null;
     }
 
-    const fallbackReason = ongoingTransaction.inserted < ongoingTransaction.price ? "INSUFFICIENT" : "INVALID";
+    const fallbackReason = deriveFailedReason(ongoingTransaction);
     return buildTransactionPayload({
       status: "FAILED",
       reason: ongoingTransaction.failureReason || fallbackReason,
@@ -388,6 +440,7 @@ function parseSmartPayLine(rawLine) {
       const parsed = JSON.parse(raw);
       const event = normalizeEvent(parsed?.event);
       if (!event) return null;
+      const normalizedRawLine = unwrapRawLine(typeof parsed?.rawLine === "string" ? parsed.rawLine : raw) || raw;
 
       return {
         kind: "event",
@@ -395,11 +448,45 @@ function parseSmartPayLine(rawLine) {
         product: typeof parsed.product === "string" ? parsed.product : null,
         paymentStatus: typeof parsed.paymentStatus === "string" ? parsed.paymentStatus : null,
         weight: typeof parsed.weight === "string" ? parsed.weight : null,
-        rawLine: raw,
+        rawLine: normalizedRawLine,
       };
     } catch {
       return null;
     }
+  }
+
+  const verboseTelemetryMatch = raw.match(
+    /^product\s+weight:\s*([+-]?\d+(?:\.\d+)?)\s*g\s*\|\s*coin\s+weight:\s*([+-]?\d+(?:\.\d+)?)\s*g\s*\|\s*product\s+type:\s*(\d+)\s*\|\s*coin\s+value:\s*(\d+)\s*\|\s*payment:\s*(ok|not\s+ok)$/i
+  );
+  if (verboseTelemetryMatch) {
+    const productType = Number(verboseTelemetryMatch[3]);
+    const coinValue = Number(verboseTelemetryMatch[4]);
+
+    if (!Number.isFinite(coinValue) || coinValue <= 0) {
+      verboseTelemetryRuntime.lastCoinValue = 0;
+      verboseTelemetryRuntime.lastProductType = productType;
+      return null;
+    }
+
+    const isNewCoinEdge =
+      verboseTelemetryRuntime.lastCoinValue !== coinValue ||
+      verboseTelemetryRuntime.lastProductType !== productType;
+
+    verboseTelemetryRuntime.lastCoinValue = coinValue;
+    verboseTelemetryRuntime.lastProductType = productType;
+
+    if (!isNewCoinEdge) {
+      return null;
+    }
+
+    return {
+      kind: "event",
+      event: "Inserted Balance",
+      product: productType === 1 ? "Product One (PHP5)" : productType === 2 ? "Product Two (PHP10)" : null,
+      paymentStatus: "Pending",
+      weight: `${Number(verboseTelemetryMatch[2]).toFixed(2)}g`,
+      rawLine: raw,
+    };
   }
 
   if (/^distance:\s*/i.test(raw) || /^product:\s*/i.test(raw)) {

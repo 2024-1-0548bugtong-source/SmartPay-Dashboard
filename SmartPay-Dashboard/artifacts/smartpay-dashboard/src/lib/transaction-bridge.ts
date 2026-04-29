@@ -17,6 +17,7 @@ export interface TransactionDraft {
   inserted: number;
   weight: number;
   failureReason: "INSUFFICIENT" | "INVALID" | null;
+  attemptedCoinValue: number | null;
   pendingCoinValue: number | null;
   startedAtMs: number;
   lastActivityAtMs: number;
@@ -112,7 +113,13 @@ function finalizeDraft(
 }
 
 function deriveFailedReason(draft: TransactionDraft): "INSUFFICIENT" | "INVALID" {
-  // Numeric comparison always wins for failed transactions.
+  // Failure classification is based on the last attempted coin first.
+  const decisionAmount = draft.attemptedCoinValue ?? draft.inserted;
+
+  if (decisionAmount > draft.price) return "INVALID";
+  if (decisionAmount < draft.price) return "INSUFFICIENT";
+
+  if (draft.failureReason) return draft.failureReason;
   return draft.inserted > draft.price ? "INVALID" : "INSUFFICIENT";
 }
 
@@ -131,6 +138,7 @@ function upsertDraftFromPrompt(
       inserted: 0,
       weight: 0,
       failureReason: null,
+      attemptedCoinValue: null,
       pendingCoinValue: null,
       startedAtMs: eventTimestampMs,
       lastActivityAtMs: eventTimestampMs,
@@ -158,6 +166,7 @@ function upsertDraftFromPrompt(
     inserted: 0,
     weight: 0,
     failureReason: null,
+      attemptedCoinValue: null,
     pendingCoinValue: null,
     startedAtMs: eventTimestampMs,
     lastActivityAtMs: eventTimestampMs,
@@ -206,6 +215,7 @@ export function applyRawEventToTransaction(
         ...nextDraft,
         inserted: nextDraft.pendingCoinValue === coinValue ? nextDraft.inserted : nextDraft.inserted + coinValue,
         weight: nextDraft.weight + parseWeight(row.weight),
+        attemptedCoinValue: coinValue,
         pendingCoinValue: nextDraft.pendingCoinValue === coinValue ? null : coinValue,
         lastActivityAtMs: eventTimestampMs,
       };
@@ -227,6 +237,7 @@ export function applyRawEventToTransaction(
             : isDuplicateOfDetectedCoin
               ? nextDraft.inserted
               : nextDraft.inserted + insertedSignal.amount,
+        attemptedCoinValue: insertedSignal.amount,
         pendingCoinValue:
           insertedSignal.mode === "absolute"
             ? null
