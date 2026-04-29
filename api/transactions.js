@@ -50,6 +50,27 @@ function rowLooksLikePir(row) {
   return /^entry(?:\s*:\s*\d+)?$/i.test(raw) || /^customer(?:\s+|_)entered\b/i.test(raw);
 }
 
+function getPirEventKey(row) {
+  if (!rowLooksLikePir(row)) return null;
+
+  const raw = typeof row?.rawLine === "string" ? row.rawLine.trim() : "";
+  const entryMatch = raw.match(/^entry\s*:\s*(\d+)$/i);
+  if (entryMatch) {
+    return `entry:${entryMatch[1]}`;
+  }
+
+  const event = normalizeEvent(row?.event);
+  if (event === "entry") {
+    return raw ? `entry:${normalizeText(raw)}` : "entry";
+  }
+
+  if (/^customer(?:\s+|_)entered\b/i.test(raw) || event === "customer entered" || event === "customer_entered") {
+    return "customer_entered";
+  }
+
+  return raw ? normalizeText(raw) : event || null;
+}
+
 function isDuplicateTransaction(store, candidate) {
   const now = Date.now();
   return store.find((row) => {
@@ -72,6 +93,7 @@ function isDuplicateEvent(store, candidate) {
   const now = Date.now();
   const candidateIsPir = rowLooksLikePir(candidate);
   const windowMs = candidateIsPir ? PIR_EVENT_DEDUPE_WINDOW_MS : EVENT_DEDUPE_WINDOW_MS;
+  const candidatePirKey = candidateIsPir ? getPirEventKey(candidate) : null;
 
   return store.find((row) => {
     const ts = Date.parse(row.timestamp);
@@ -79,7 +101,17 @@ function isDuplicateEvent(store, candidate) {
     if (now - ts > windowMs) return false;
 
     if (candidateIsPir) {
-      return rowLooksLikePir(row);
+      if (!rowLooksLikePir(row)) return false;
+
+      const rowPirKey = getPirEventKey(row);
+      if (candidatePirKey && rowPirKey) {
+        return rowPirKey === candidatePirKey;
+      }
+
+      return (
+        normalizeEvent(row.event) === normalizeEvent(candidate.event) &&
+        normalizeText(row.rawLine) === normalizeText(candidate.rawLine)
+      );
     }
 
     return (

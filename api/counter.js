@@ -71,30 +71,61 @@ function isPirEvent(value) {
   return ev === "entry" || ev === "customer entered" || ev === "customer_entered";
 }
 
+function getCanonicalPirKey(row) {
+  const raw = typeof row?.rawLine === "string" ? row.rawLine.trim() : "";
+  const entryMatch = raw.match(/^entry\s*:\s*(\d+)$/i);
+  if (entryMatch) {
+    return `entry:${entryMatch[1]}`;
+  }
+
+  const event = normalizeEvent(row?.event);
+  if (event === "entry") {
+    return raw ? `entry:${raw.toLowerCase()}` : `entry:${row?.timestamp ?? "unknown"}`;
+  }
+
+  return null;
+}
+
+function isFallbackPirEvent(row) {
+  const ev = normalizeEvent(row?.event);
+  if (ev === "customer entered" || ev === "customer_entered") return true;
+  if (typeof row?.rawLine !== "string") return false;
+  return /^customer(?:\s+|_)entered\b/i.test(row.rawLine.trim());
+}
+
 function computePirCount(rows) {
   const PIR_DEDUPE_WINDOW_MS = 4000;
 
-  function rowLooksLikePir(row) {
-    if (isPirEvent(row?.event)) return true;
-    if (typeof row?.rawLine !== "string") return false;
-    const raw = row.rawLine.toLowerCase();
-    if (/^entry:\s*\d+/i.test(raw)) return true;
-    if (/\bcustomer entered\b/i.test(raw)) return true;
-    if (/\bentry\b/i.test(raw)) return true;
-    return false;
-  }
-
   const candidates = rows
-    .filter((row) => rowLooksLikePir(row))
+    .filter((row) => isPirEvent(row?.event) || typeof row?.rawLine === "string")
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
 
   let count = 0;
   let lastCountedAt = 0;
   let latestPirTimestamp = null;
+  const seenCanonicalEntries = new Set();
+
+  const hasCanonicalEntries = candidates.some((row) => getCanonicalPirKey(row) !== null);
 
   for (const row of candidates) {
     const ts = Date.parse(row.timestamp);
     if (!Number.isFinite(ts)) continue;
+
+    const canonicalKey = getCanonicalPirKey(row);
+    if (hasCanonicalEntries) {
+      if (!canonicalKey || seenCanonicalEntries.has(canonicalKey)) {
+        continue;
+      }
+
+      seenCanonicalEntries.add(canonicalKey);
+      latestPirTimestamp = row.timestamp;
+      count += 1;
+      continue;
+    }
+
+    if (!isFallbackPirEvent(row)) {
+      continue;
+    }
 
     latestPirTimestamp = row.timestamp;
 
