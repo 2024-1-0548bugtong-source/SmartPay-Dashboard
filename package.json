@@ -22,7 +22,7 @@
   "scripts": {
     "serial:list": "node index.js --list",
     "serial:read": "node index.js",
-    "bridge:vercel": "node bridge-json-vercel.js",
+    "bridge:vercel": "ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyACM0 https://honest-pay-dashboard.vercel.app/",
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

@@ -73,8 +73,13 @@ pm2 restart honestpay
 Restart the serial bridge (so it sends events to the updated API endpoint):
 
 ```bash
-ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyACM0 https://<your-deployment-url>
-# or for testing against local server
+# Always connect to the Vercel dashboard (production)
+npm run bridge:vercel
+
+# Or run the helper script (specify serial device if needed):
+./scripts/start-bridge-vercel.sh /dev/ttyACM0
+
+# (For local testing only) point to localhost instead:
 ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyACM0 http://localhost:3000
 ```
 
@@ -118,3 +123,66 @@ Want me to deploy for you?
   - A Vercel token and confirmation to run `vercel --prod` from this workspace.
 
 If you prefer, I can just prepare a script and guide (this file). Tell me if you want me to try deploying now and which method you prefer (Git push + Vercel CLI, or just push to GitHub and let Vercel auto-deploy).
+
+Restarting services (server + bridge)
+-----------------------------------
+
+What I ran locally to restart the dashboard and bridge:
+
+```bash
+# stop any running dashboard server
+pkill -f "node server.js" || true
+
+# start the local dashboard server (runs on http://localhost:3000)
+node server.js
+
+# start the serial bridge and enable event posts (replace serial device as needed)
+ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyACM0 http://localhost:3000
+```
+
+Quick troubleshooting when the bridge reports "No such file or directory, cannot open /dev/ttyACM0":
+
+- Check which serial device appears when you plug the Arduino in:
+
+```bash
+ls /dev/ttyACM* /dev/ttyUSB*  # common Linux serial device names
+dmesg | grep -i tty
+```
+
+- If the serial device is different (for example `/dev/ttyUSB0`), re-run the bridge with that path:
+
+```bash
+ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyUSB0 http://localhost:3000
+```
+
+Verification steps after restart:
+
+- Open the dashboard: `http://localhost:3000`
+- Check server logs for: `[WEB] Dashboard: http://localhost:3000`
+- Check bridge logs for lines starting with `[RAW]`, `[SENT]`, `[SKIP]` or `Serial error:`
+- Query the APIs to confirm data flows:
+
+```bash
+curl http://localhost:3000/api/counter
+curl http://localhost:3000/api/transactions
+```
+
+Running services in background (optional):
+
+- Use `pm2`:
+```bash
+npm i -g pm2
+pm2 start server.js --name honestpay-server
+pm2 start --name honestpay-bridge -- node bridge-json-vercel.js /dev/ttyACM0 http://localhost:3000
+pm2 restart honestpay-server # after code changes
+pm2 restart honestpay-bridge
+```
+
+Or use `nohup`/`&` for simple background runs:
+
+```bash
+nohup node server.js > server.log 2>&1 &
+nohup ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyACM0 http://localhost:3000 > bridge.log 2>&1 &
+```
+
+If you want, I can modify `server.js` to avoid auto-opening the serial port on startup (helpful if you only want the bridge to own the serial device). Ask me and I will add an environment guard.
