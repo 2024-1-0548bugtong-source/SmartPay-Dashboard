@@ -90,10 +90,13 @@ function computePirCount(rows) {
 
   let count = 0;
   let lastCountedAt = 0;
+  let latestPirTimestamp = null;
 
   for (const row of candidates) {
     const ts = Date.parse(row.timestamp);
     if (!Number.isFinite(ts)) continue;
+
+    latestPirTimestamp = row.timestamp;
 
     if (ts - lastCountedAt >= PIR_DEDUPE_WINDOW_MS) {
       count += 1;
@@ -101,7 +104,7 @@ function computePirCount(rows) {
     }
   }
 
-  return count;
+  return { count, latestPirTimestamp };
 }
 
 module.exports = async function handler(req, res) {
@@ -114,13 +117,14 @@ module.exports = async function handler(req, res) {
   }
 
   const rows = await getRowsForCounter(req);
-  const customerEnteredCount = computePirCount(rows);
+  const pirSummary = computePirCount(rows);
 
   return sendJson(res, 200, {
     ok: true,
     event: "customer_entered",
-    count: customerEnteredCount,
+    count: pirSummary.count,
     totalRows: rows.length,
+    latestPirTimestamp: pirSummary.latestPirTimestamp,
     updatedAt: new Date().toISOString(),
   });
 };

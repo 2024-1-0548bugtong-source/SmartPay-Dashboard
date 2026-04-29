@@ -54,6 +54,10 @@ async function runTest(name, reqBody) {
   console.log(eventBody);
   assert.equal(eventBody.row.event, 'Entry');
 
+  const duplicateEventBody = await runTest('EVENT_entry_duplicate', { event: 'Entry', rawLine: 'Customer Entered' });
+  console.log(duplicateEventBody);
+  assert.equal(duplicateEventBody.duplicate, true);
+
   // Test: SUCCESS with inserted 5
   const successBody = await runTest('SUCCESS_inserted_5', { status: 'SUCCESS', reason: 'VALID', product: 'P1', price: 5, inserted: 5, rawLine: 'transaction:success:P1:php5' });
   console.log(successBody);
@@ -79,6 +83,7 @@ async function runTest(name, reqBody) {
   const counterBody = JSON.parse(cres._getBody().body);
   console.log('COUNTER:', counterBody);
   assert.equal(counterBody.count, 1);
+  assert.equal(counterBody.latestPirTimestamp, store[1].timestamp);
 
   if (originalTransactionsUrl === undefined) delete process.env.TRANSACTIONS_API_URL;
   else process.env.TRANSACTIONS_API_URL = originalTransactionsUrl;

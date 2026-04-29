@@ -264,6 +264,12 @@ function parseApiWeight(weight: string | number | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function parseTimestampMs(value: string | null | undefined): number {
+  if (typeof value !== "string") return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function parseInsertedFromRawFrontend(rawLine: string | null | undefined): number | null {
   if (typeof rawLine !== "string") return null;
   const raw = rawLine.trim();
@@ -366,6 +372,8 @@ export default function Dashboard() {
   const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const ongoingTransactionRef = useRef<TransactionDraft | null>(null);
   const transactionsApiModeRef = useRef<TransactionsApiMode>(defaultTransactionsApiMode());
+  const clearedAtRef = useRef(0);
+  const lastCounterPirTimestampRef = useRef(0);
 
   const sm = useStateMachine();
   const effectiveLcdState = serialLcdState ?? sm.lcdState;
@@ -394,8 +402,29 @@ export default function Dashboard() {
         if (cancelled) return;
 
         if (data && typeof data.count === "number") {
+          const latestPirTimestampMs = parseTimestampMs(data.latestPirTimestamp ?? null);
+
+          if (latestPirTimestampMs > 0 && latestPirTimestampMs < clearedAtRef.current) {
+            setCounterStatus("live");
+            return;
+          }
+
+          if (latestPirTimestampMs > 0 && latestPirTimestampMs < lastCounterPirTimestampRef.current) {
+            setCounterStatus("live");
+            return;
+          }
+
+          if (latestPirTimestampMs > lastCounterPirTimestampRef.current) {
+            lastCounterPirTimestampRef.current = latestPirTimestampMs;
+          }
+
           // Only update the canonical entry counter from the API.
-          setEntryCount(data.count);
+          setEntryCount((prev) => {
+            if (data.count === 0 && latestPirTimestampMs === 0 && clearedAtRef.current > 0) {
+              return 0;
+            }
+            return Math.max(prev, data.count);
+          });
           setCounterStatus("live");
         } else {
           setCounterStatus("no-data");
@@ -433,7 +462,12 @@ export default function Dashboard() {
 
       if (!Array.isArray(apiRows)) return;
 
-      const rawRows: RawTransactionEvent[] = apiRows
+      const filteredApiRows = apiRows.filter((row) => {
+        const timestampMs = parseTimestampMs(row.timestamp);
+        return clearedAtRef.current === 0 || timestampMs === 0 || timestampMs >= clearedAtRef.current;
+      });
+
+      const rawRows: RawTransactionEvent[] = filteredApiRows
         .filter((row) => typeof row.event === "string" && row.event.trim().length > 0)
         .map((r) => ({
           id: String(r.id),
@@ -446,7 +480,8 @@ export default function Dashboard() {
         }))
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-      const completedRows = normalizeCompletedApiRows(apiRows);
+      const completedRows = normalizeCompletedApiRows(filteredApiRows);
+      const fetchedTransactions = mergeCompletedTransactions(completedRows, buildCompletedTransactionsFromEvents(rawRows));
 
       if (rawRows.length > 0) {
         transactionsApiModeRef.current = "raw-events";
@@ -456,7 +491,17 @@ export default function Dashboard() {
 
       // Apply merged transactions. Do NOT derive the canonical entry counter
       // from these rows — the UI `entryCount` is controlled only by /api/counter.
-      setTransactions(mergeCompletedTransactions(completedRows, buildCompletedTransactionsFromEvents(rawRows)));
+      setTransactions((prev) => {
+        const filteredPrev = clearedAtRef.current === 0
+          ? prev
+          : prev.filter((row) => parseTimestampMs(row.timestamp) >= clearedAtRef.current);
+
+        if (fetchedTransactions.length >= filteredPrev.length) {
+          return fetchedTransactions;
+        }
+
+        return mergeCompletedTransactions(filteredPrev, fetchedTransactions);
+      });
     } catch (err) {
       console.debug("Failed to fetch transactions:", err);
     }
@@ -720,7 +765,10 @@ export default function Dashboard() {
                 localStorage.removeItem('smartpay_transactions');
                 localStorage.removeItem('smartpay_pir_counter');
                 ongoingTransactionRef.current = null;
+                clearedAtRef.current = Date.now();
+                lastCounterPirTimestampRef.current = 0;
                 setTransactions([]);
+                setEntryCount(0);
                 // Clear local-only PIR counter used for offline/debug display.
                 setLocalPirCount(0);
                 console.log('[ACTION] Cleared local and remote transactions');

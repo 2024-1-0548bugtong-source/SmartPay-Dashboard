@@ -1,5 +1,9 @@
+// @ts-nocheck
+
 const MAX_ROWS = 1000;
 const DEDUPE_WINDOW_MS = 3000;
+const EVENT_DEDUPE_WINDOW_MS = 1500;
+const PIR_EVENT_DEDUPE_WINDOW_MS = 4000;
 
 function getStore() {
   if (!globalThis.__honestpayTransactions) {
@@ -30,6 +34,22 @@ function normalizeText(value) {
   return value.trim().toLowerCase();
 }
 
+function normalizeEvent(value) {
+  return normalizeText(value).replace(/\s+/g, " ");
+}
+
+function isPirEventValue(value) {
+  const event = normalizeEvent(value);
+  return event === "entry" || event === "customer entered" || event === "customer_entered";
+}
+
+function rowLooksLikePir(row) {
+  if (isPirEventValue(row?.event)) return true;
+  if (typeof row?.rawLine !== "string") return false;
+  const raw = row.rawLine.toLowerCase();
+  return /^entry(?:\s*:\s*\d+)?$/i.test(raw) || /^customer(?:\s+|_)entered\b/i.test(raw);
+}
+
 function isDuplicateTransaction(store, candidate) {
   const now = Date.now();
   return store.find((row) => {
@@ -44,6 +64,29 @@ function isDuplicateTransaction(store, candidate) {
       normalizeText(row.reason) === normalizeText(candidate.reason) &&
       String(row.price ?? "") === String(candidate.price ?? "") &&
       String(row.inserted ?? "") === String(candidate.inserted ?? "")
+    );
+  });
+}
+
+function isDuplicateEvent(store, candidate) {
+  const now = Date.now();
+  const candidateIsPir = rowLooksLikePir(candidate);
+  const windowMs = candidateIsPir ? PIR_EVENT_DEDUPE_WINDOW_MS : EVENT_DEDUPE_WINDOW_MS;
+
+  return store.find((row) => {
+    const ts = Date.parse(row.timestamp);
+    if (!Number.isFinite(ts)) return false;
+    if (now - ts > windowMs) return false;
+
+    if (candidateIsPir) {
+      return rowLooksLikePir(row);
+    }
+
+    return (
+      normalizeEvent(row.event) === normalizeEvent(candidate.event) &&
+      normalizeText(row.rawLine) === normalizeText(candidate.rawLine) &&
+      normalizeText(row.product) === normalizeText(candidate.product) &&
+      normalizeText(row.paymentStatus) === normalizeText(candidate.paymentStatus)
     );
   });
 }
@@ -100,7 +143,7 @@ module.exports = async function handler(req, res) {
       const body = await readJsonBody(req);
       // Accept event-only rows (e.g., PIR "Entry") so counters can be computed
       if (typeof body?.event === "string" && body.event.trim()) {
-        const row = {
+        const candidate = {
           id: Date.now(),
           timestamp: body.timestamp ? new Date(body.timestamp).toISOString() : new Date().toISOString(),
           event: body.event,
@@ -110,10 +153,15 @@ module.exports = async function handler(req, res) {
           rawLine: body.rawLine ?? null,
         };
 
-        store.unshift(row);
+        const duplicate = isDuplicateEvent(store, candidate);
+        if (duplicate) {
+          return sendJson(res, 200, { ok: true, duplicate: true, row: duplicate });
+        }
+
+        store.unshift(candidate);
         if (store.length > MAX_ROWS) store.length = MAX_ROWS;
 
-        return sendJson(res, 201, { ok: true, row });
+        return sendJson(res, 201, { ok: true, duplicate: false, row: candidate });
       }
       const status = normalizeStatus(body?.status);
       const reason = normalizeReason(body?.reason);

@@ -42,6 +42,7 @@ function makeRes() {
   console.log('COUNTER RESPONSE:', body);
   assert.equal(body.count, 2);
   assert.equal(body.totalRows, rows.length);
+  assert.equal(body.latestPirTimestamp, '2026-04-29T08:00:06.500Z');
 
   if (originalTransactionsUrl === undefined) delete process.env.TRANSACTIONS_API_URL;
   else process.env.TRANSACTIONS_API_URL = originalTransactionsUrl;
