@@ -1,44 +1,86 @@
-I am debugging an Arduino → CMD bridge that forwards PIR events to a Vercel API.
+I am debugging a Node.js CMD/Serial bridge that forwards Arduino events
+(PIR entries and vending transactions) to a Vercel API.
 
-PROBLEM:
-Customer entry count does not increment even though PIR events appear in logs.
+Backend and dashboard are already working and must NOT be modified.
+Arduino/hardware logic is correct and must NOT be modified.
 
-EVIDENCE:
-CMD logs show:
-- Event "Entry" is valid and should increment the counter
-- Variants like "entry" and "Customer Entered" are emitted
-- Deduplication fires BEFORE increment:
-  [SKIP] Duplicate PIR event within dedupe window: entry
-- Non-canonical names are ignored:
-  [SKIP] Non-entry PIR event: customer entered
+==============================
+PROBLEMS TO FIX (BRIDGE ONLY)
+==============================
 
-ROOT CAUSE:
-- Multiple PIR event names represent the same physical event
-- Deduplication happens based on raw event string
-- Valid Entry events are skipped before they reach the backend
+1) Customer entry (PIR) events are detected in logs but never reach the backend,
+   so /api/counter never increments and the dashboard does not update.
 
-REQUIRED FIX:
+2) FAILED transactions show Inserted PHP = 0 in the dashboard,
+   even though the hardware correctly detected inserted coins.
 
-1) Normalize PIR event names EARLY:
-   - Convert to lowercase
-   - Map ALL variants to a single canonical event: "entry"
+==============================
+ROOT CAUSES IDENTIFIED
+==============================
 
-   Examples:
-   "Entry" → "entry"
-   "Customer Entered" → "entry"
-   "customer entered" → "entry"
+A) PIR DEDUPLICATION BUG
+- All PIR events are dropped because deduplication runs BEFORE a send happens.
+- lastPirSentAt is updated too early, causing the FIRST valid Entry event to be skipped.
+- Deduplication must suppress only rapid repeats, not the initial trigger.
 
-2) Apply deduplication ONLY AFTER normalization
+B) INSERTED AMOUNT LOSS
+- FAILED transactions reconstruct payloads after ongoingTransaction is cleared.
+- This forces inserted to default to 0.
+- A completed transaction must not depend on mutable state to reconstruct inserted.
 
-3) Deduplicate by time (timestamp window), NOT raw string comparison
+==============================
+REQUIRED FIXES
+==============================
 
-4) Ensure exactly ONE API call is sent per physical entry:
-   - POST { event: "Entry", rawLine, timestamp }
+1) PIR EVENT HANDLING
+-------------------
+- Normalize ALL PIR variants ("Entry", "entry", "Customer Entered") into ONE canonical event: "Entry"
+- Deduplicate PIR events ONLY after a successful POST to the backend
+- Do NOT update lastPirSentAt when merely seeing or parsing an event
+- Update lastPirSentAt ONLY after sending an Entry event successfully
 
-5) Do NOT change backend or dashboard code
+Correct pattern:
+- Detect PIR
+- Send Entry immediately
+- THEN start dedupe window
 
-GOAL:
-Every physical PIR trigger must:
-- Result in exactly one Entry increment
-- Not be skipped due to string variant or premature dedupe
+2) TRANSACTION INSERTED LOGIC
+-----------------------------
+- FAILED transactions must preserve the REAL inserted amount
+- Never default inserted to 0 just because ongoingTransaction is null
+- Do NOT reconstruct FAILED transactions from summary lines like:
+  "transaction:failed:P1:insufficient"
+
+Correct approach (choose one):
+- Ignore FAILED transaction summary lines entirely and rely on
+  consumeEventTransaction() which already has correct inserted value
+OR
+- Store lastKnownInserted separately and use it for FAILED transactions
+
+Rule:
+- Inserted PHP = 0 is valid only if ZERO coins were actually inserted,
+  not because state was cleared.
+
+==============================
+WHAT NOT TO CHANGE
+==============================
+
+- Do NOT modify Arduino code
+- Do NOT modify backend API or dashboard React code
+- Do NOT change API schemas
+- Do NOT remove deduplication entirely
+
+==============================
+GOAL
+==============================
+
+After fixes:
+- First PIR trigger ALWAYS sends exactly one { event: "Entry" }
+- /api/counter increments correctly
+- Dashboard updates live
+- FAILED transactions display correct Inserted PHP
+- INVALID vs INSUFFICIENT logic remains accurate
+
+Please apply the minimal, correct changes directly in this bridge file
+to satisfy all rules above.
 ``

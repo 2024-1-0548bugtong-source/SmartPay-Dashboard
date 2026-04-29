@@ -64,6 +64,8 @@ const ALLOW_EVENT_POSTS = process.env.ALLOW_EVENT_POSTS === "true";
 
 let lastSentAt = 0;
 let lastPirSentAt = 0;
+/** @type {number | null} */
+let lastKnownInserted = null;
 /** @type {OngoingTransaction | null} */
 let ongoingTransaction = null;
 
@@ -146,6 +148,21 @@ function parseInsertedAmount(rawLine, product) {
 }
 
 /**
+ * Parse only explicit inserted values from a raw line. Returns `null`
+ * when no explicit inserted amount is present (do not fallback to inferred price).
+ * @param {string} rawLine
+ * @returns {number | null}
+ */
+function parseInsertedExplicit(rawLine) {
+  if (!rawLine) return null;
+  const insertedMatch = String(rawLine).match(/inserted:\s*php(\d+)/i);
+  if (insertedMatch) return Number.parseInt(insertedMatch[1], 10);
+  const contractInsertMatch = String(rawLine).match(/coin\s*:\s*(5|10)\s*pesos/i);
+  if (contractInsertMatch) return Number.parseInt(contractInsertMatch[1], 10);
+  return null;
+}
+
+/**
  * @param {{ status: TransactionStatus, reason: TransactionReason, rawLine: string }} param0
  * @returns {TransactionPayload | null}
  */
@@ -168,6 +185,11 @@ function buildTransactionPayload({ status, reason, rawLine }) {
     reason,
     rawLine,
   };
+
+  // Preserve the last known inserted amount so summary/failed lines that
+  // arrive after `ongoingTransaction` is cleared can still report the
+  // real inserted value instead of defaulting to 0.
+  lastKnownInserted = Number.isFinite(ongoingTransaction.inserted) ? ongoingTransaction.inserted : lastKnownInserted;
 
   ongoingTransaction = null;
   return payload;
@@ -295,12 +317,33 @@ function parseTransactionLine(rawLine) {
   const failedMatch = raw.match(/^transaction:failed:([^:]+):([a-z]+)$/i);
   if (failedMatch) {
     const reason = failedMatch[2].toUpperCase();
+    const product = formatTransactionProduct(failedMatch[1]);
+    const price = inferPriceFromProduct(failedMatch[1]);
+
+    // Prefer explicit inserted amounts encoded in the raw line, then
+    // prefer the active `ongoingTransaction` value, then fall back to the
+    // last preserved inserted amount if available. Only fallback to 0 as
+    // a last resort.
+    const explicitInserted = parseInsertedExplicit(raw);
+    let insertedVal = 0;
+    if (ongoingTransaction && Number.isFinite(ongoingTransaction.inserted)) {
+      insertedVal = ongoingTransaction.inserted;
+    } else if (explicitInserted !== null) {
+      insertedVal = explicitInserted;
+    } else if (Number.isFinite(lastKnownInserted)) {
+      insertedVal = lastKnownInserted;
+      // consume it so it won't be reused for unrelated later lines
+      lastKnownInserted = null;
+    } else {
+      insertedVal = 0;
+    }
+
     return {
       kind: "transaction",
       status: "FAILED",
-      product: formatTransactionProduct(failedMatch[1]),
-      price: inferPriceFromProduct(failedMatch[1]),
-      inserted: ongoingTransaction && Number.isFinite(ongoingTransaction.inserted) ? ongoingTransaction.inserted : 0,
+      product,
+      price,
+      inserted: insertedVal,
       weight: null,
       reason: reason === "INVALID" || reason === "INSUFFICIENT" ? reason : "INVALID",
       rawLine: raw,
@@ -534,11 +577,7 @@ function isEntryOnlyPirEvent(eventName) {
 
 /** @param {number} nowMs */
 function shouldDropPirDuplicate(nowMs) {
-  if (nowMs - lastPirSentAt < DEDUPE_WINDOW_MS) {
-    return true;
-  }
-  lastPirSentAt = nowMs;
-  return false;
+  return nowMs - lastPirSentAt < DEDUPE_WINDOW_MS;
 }
 
 async function start() {
@@ -661,6 +700,8 @@ async function start() {
             // Ensure the API receives the canonical event name but keep
             // the original rawLine so downstream can see the exact source.
             await postToVercel({ ...eventPayload, event: "Entry" });
+            // Only start the PIR dedupe window after a successful POST
+            lastPirSentAt = now;
             console.log(`[SENT] event:entry`);
           } catch (err) {
             console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
