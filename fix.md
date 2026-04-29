@@ -1,64 +1,44 @@
- (React frontend + serverless API).
+I am debugging an Arduino → CMD bridge that forwards PIR events to a Vercel API.
 
-Backend status:
-- Backend is already fixed and tested locally
-- /api/transactions and /api/counter both return HTTP 200 in production
-- Arduino and serial bridge must NOT be changed
+PROBLEM:
+Customer entry count does not increment even though PIR events appear in logs.
 
-PROBLEMS TO FIX (frontend + transaction classification consistency):
+EVIDENCE:
+CMD logs show:
+- Event "Entry" is valid and should increment the counter
+- Variants like "entry" and "Customer Entered" are emitted
+- Deduplication fires BEFORE increment:
+  [SKIP] Duplicate PIR event within dedupe window: entry
+- Non-canonical names are ignored:
+  [SKIP] Non-entry PIR event: customer entered
 
-1) Customer entry (PIR count) does not update on the dashboard
-   even though GET /api/counter is being polled successfully.
+ROOT CAUSE:
+- Multiple PIR event names represent the same physical event
+- Deduplication happens based on raw event string
+- Valid Entry events are skipped before they reach the backend
 
-2) The dashboard still displays incorrect FAILED transaction rows
-   where insertedAmount appears as 0 when it should not.
+REQUIRED FIX:
 
-FAILING EXAMPLE THAT MUST BE HANDLED CORRECTLY:
+1) Normalize PIR event names EARLY:
+   - Convert to lowercase
+   - Map ALL variants to a single canonical event: "entry"
 
-Timestamp            Product  Price (PHP)  Inserted (PHP)  Status   Reason
-2026-04-29 15:21     P1       PHP 5        PHP 0           FAILED   INSUFFICIENT
-2026-04-29 15:20     P2       PHP 10       PHP 0           FAILED   INSUFFICIENT
-2026-04-29 15:20     P1       PHP 5        PHP 5           SUCCESS  VALID
+   Examples:
+   "Entry" → "entry"
+   "Customer Entered" → "entry"
+   "customer entered" → "entry"
 
-RULES (must be reflected accurately in UI and logic):
+2) Apply deduplication ONLY AFTER normalization
 
-- SUCCESS + VALID:
-  insertedAmount === productPrice
+3) Deduplicate by time (timestamp window), NOT raw string comparison
 
-- FAILED + INSUFFICIENT:
-  insertedAmount < productPrice
-  (including explicit insertedAmount = 0)
+4) Ensure exactly ONE API call is sent per physical entry:
+   - POST { event: "Entry", rawLine, timestamp }
 
-- FAILED + INVALID:
-  insertedAmount > productPrice
+5) Do NOT change backend or dashboard code
 
-IMPORTANT:
-- insertedAmount = 0 is a VALID value, not “missing”
-- UI must not hide, replace, or normalize 0 to something else
-- Dashboard must display the exact insertedAmount returned by the API
-- FAILED transactions must still show the real insertedAmount
-
-PIR / ENTRY COUNTER RULES:
-
-- entryCount must have independent state:
-  const [entryCount, setEntryCount] = useState(0)
-
-- entryCount must be updated ONLY from GET /api/counter
-- entryCount must NOT:
-  - be derived from transactions
-  - reset when transactions update
-  - depend on transaction success
-
-TASK FOR COPILOT:
-
-- Audit the dashboard frontend code
-- Fix state management so transaction rows render correct insertedAmount
-- Ensure FAILED rows with insertedAmount = 0 render correctly
-- Fix entryCount so it updates reliably from /api/counter
-- Prevent any useEffect, reducer, or formatter from overwriting these values
-- Keep existing UI structure where possible
-- Do NOT modify backend or hardware-related files
-
-OUTPUT:
-Provide corrected React component code (state, useEffect, fetch logic, and rendering)
-that satisfies all the rules above.
+GOAL:
+Every physical PIR trigger must:
+- Result in exactly one Entry increment
+- Not be skipped due to string variant or premature dedupe
+``

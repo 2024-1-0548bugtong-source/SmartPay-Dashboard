@@ -622,22 +622,22 @@ async function start() {
       return;
     }
 
-    const eventName = normalizeEvent(parsed.event);
+    let eventName = normalizeEvent(parsed.event);
     if (!eventName) {
       return;
     }
 
-    // Keep only "Entry" as the persisted PIR event to avoid double counting
-    // from paired "Entry" + "Customer Entered" Arduino lines.
-    if (parsed.kind === "event" && isPirEventName(eventName) && !isEntryOnlyPirEvent(eventName)) {
-      console.warn(`[SKIP] Non-entry PIR event: ${eventName}`);
-      return;
+    // Normalize ALL PIR event name variants to a single canonical name
+    // before any deduplication or filtering. This ensures "Entry",
+    // "Customer Entered", "customer_entered", etc. are treated the same.
+    if (isPirEventName(eventName)) {
+      eventName = "entry";
     }
 
     const payload = consumeEventTransaction(parsed);
 
     if (!payload) {
-      if (isPirEventName(eventName)) {
+      if (eventName === "entry") {
         const now = Date.now();
         if (shouldDropPirDuplicate(now)) {
           console.warn(`[SKIP] Duplicate PIR event within dedupe window: ${eventName}`);
@@ -658,8 +658,10 @@ async function start() {
           console.log(`[SKIP] Event posts disabled; not sending PIR event: ${eventName}`);
         } else {
           try {
-            await postToVercel(eventPayload);
-            console.log(`[SENT] event:${eventName}`);
+            // Ensure the API receives the canonical event name but keep
+            // the original rawLine so downstream can see the exact source.
+            await postToVercel({ ...eventPayload, event: "Entry" });
+            console.log(`[SENT] event:entry`);
           } catch (err) {
             console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
           }
