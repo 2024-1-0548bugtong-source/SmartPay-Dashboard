@@ -1,4 +1,4 @@
-import { formatProductLabel } from "./serial";
+import { formatProductLabel, unwrapRawSerialLine } from "./serial";
 import type { TransactionRow } from "./storage";
 
 export interface RawTransactionEvent {
@@ -49,17 +49,19 @@ function parseInsertedSignal(
   rawLine: string | null,
   product: string | null
 ): { amount: number; mode: "absolute" | "increment" } | null {
-  const insertedMatch = rawLine?.match(/inserted:\s*php(\d+)/i);
+  const normalizedRawLine = unwrapRawSerialLine(rawLine);
+
+  const insertedMatch = normalizedRawLine?.match(/inserted:\s*php(\d+)/i);
   if (insertedMatch) {
     return { amount: parseInt(insertedMatch[1], 10), mode: "absolute" };
   }
 
-  const contractInsertMatch = rawLine?.match(/coin\s*:\s*(5|10)\s*pesos/i);
+  const contractInsertMatch = normalizedRawLine?.match(/coin\s*:\s*(5|10)\s*pesos/i);
   if (contractInsertMatch) {
     return { amount: parseInt(contractInsertMatch[1], 10), mode: "increment" };
   }
 
-  const telemetryCoinValueMatch = rawLine?.match(/coin\s+value:\s*(5|10)\b/i);
+  const telemetryCoinValueMatch = normalizedRawLine?.match(/coin\s+value:\s*(5|10)\b/i);
   if (telemetryCoinValueMatch) {
     return { amount: parseInt(telemetryCoinValueMatch[1], 10), mode: "increment" };
   }
@@ -240,10 +242,11 @@ export function applyRawEventToTransaction(
   if (evLower === "invalid coin") {
     const paymentStatus = row.paymentStatus?.toLowerCase();
     const failureReason = deriveFailedReason(nextDraft);
+    const normalizedRawLine = unwrapRawSerialLine(row.rawLine) ?? "";
     const isTerminalInvalid =
       paymentStatus === "no coin detected" ||
       paymentStatus === "insufficient" ||
-      /payment invalid|payment incomplete|add more coins/i.test(row.rawLine ?? "");
+      /payment invalid|payment incomplete|add more coins/i.test(normalizedRawLine);
 
     if (isTerminalInvalid) {
       return {

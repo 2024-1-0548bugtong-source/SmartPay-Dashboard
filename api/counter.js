@@ -66,13 +66,35 @@ function normalizeEvent(value) {
   return value.trim().toLowerCase();
 }
 
+function unwrapRawLine(value) {
+  if (typeof value !== "string") return "";
+
+  let raw = value.trim();
+  if (!raw) return "";
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!raw.startsWith("{")) break;
+
+    try {
+      const parsed = JSON.parse(raw);
+      const nestedRaw = typeof parsed?.rawLine === "string" ? parsed.rawLine.trim() : "";
+      if (!nestedRaw || nestedRaw === raw) break;
+      raw = nestedRaw;
+    } catch {
+      break;
+    }
+  }
+
+  return raw;
+}
+
 function isPirEvent(value) {
   const ev = normalizeEvent(value);
   return ev === "entry" || ev === "customer entered" || ev === "customer_entered";
 }
 
 function getCanonicalPirKey(row) {
-  const raw = typeof row?.rawLine === "string" ? row.rawLine.trim() : "";
+  const raw = unwrapRawLine(row?.rawLine);
   const entryMatch = raw.match(/^entry\s*:\s*(\d+)$/i);
   if (entryMatch) {
     return `entry:${entryMatch[1]}`;
@@ -90,7 +112,7 @@ function isFallbackPirEvent(row) {
   const ev = normalizeEvent(row?.event);
   if (ev === "customer entered" || ev === "customer_entered") return true;
   if (typeof row?.rawLine !== "string") return false;
-  return /^customer(?:\s+|_)entered\b/i.test(row.rawLine.trim());
+  return /^customer(?:\s+|_)entered\b/i.test(unwrapRawLine(row.rawLine));
 }
 
 function computePirCount(rows) {

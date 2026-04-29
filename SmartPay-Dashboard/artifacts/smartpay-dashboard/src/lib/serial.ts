@@ -100,6 +100,28 @@ export function formatProductPrice(token: string | null | undefined): string | n
   return digit ? `PHP${digit}` : null;
 }
 
+export function unwrapRawSerialLine(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+
+  let raw = value.trim();
+  if (!raw) return null;
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!raw.startsWith("{")) break;
+
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const nestedRaw = typeof parsed.rawLine === "string" ? parsed.rawLine.trim() : "";
+      if (!nestedRaw || nestedRaw === raw) break;
+      raw = nestedRaw;
+    } catch {
+      break;
+    }
+  }
+
+  return raw || null;
+}
+
 /** Pad or truncate a string to exactly 16 characters for LCD display */
 export function lcdPad(s: string): string {
   return s.slice(0, LCD_COLS).padEnd(LCD_COLS, " ");
@@ -128,6 +150,9 @@ function parseJsonSerialLine(raw: string): ParsedSerialLine | null {
 
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const normalizedRawLine = unwrapRawSerialLine(
+      typeof parsed.rawLine === "string" ? parsed.rawLine : raw
+    ) ?? raw;
     const eventRaw = typeof parsed.event === "string" ? parsed.event.trim() : null;
     const statusRaw = typeof parsed.status === "string" ? parsed.status.trim() : null;
 
@@ -213,7 +238,7 @@ function parseJsonSerialLine(raw: string): ParsedSerialLine | null {
       product: product ?? (resolvedEvent === "Coin Detected" ? coinProduct : null),
       paymentStatus,
       weight: numericWeight !== null ? `${numericWeight.toFixed(2)}g` : null,
-      rawLine: raw,
+      rawLine: normalizedRawLine,
       isLogEntry,
       isPirEntry,
       lcdState,

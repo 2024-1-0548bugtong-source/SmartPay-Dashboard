@@ -6,7 +6,7 @@ import {
   loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
   exportCsv, computeStats, loadPirCounter, savePirCounter, incrementPirCounter, type TransactionRow,
 } from "@/lib/storage";
-import { PRODUCT_CATALOG, formatProductLabel, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
+import { PRODUCT_CATALOG, formatProductLabel, parseSerialLine, lcdPad, unwrapRawSerialLine, type LcdState } from "@/lib/serial";
 import {
   applyRawEventToTransaction,
   buildCompletedTransactionsFromEvents,
@@ -271,7 +271,7 @@ function parseTimestampMs(value: string | null | undefined): number {
 }
 
 function getCanonicalPirEntryKey(event: string | null | undefined, rawLine: string | null | undefined): string | null {
-  const raw = typeof rawLine === "string" ? rawLine.trim() : "";
+  const raw = unwrapRawSerialLine(rawLine)?.trim() ?? "";
   const entryMatch = raw.match(/^entry\s*:\s*(\d+)$/i);
   if (entryMatch) return `entry:${entryMatch[1]}`;
 
@@ -284,8 +284,7 @@ function getCanonicalPirEntryKey(event: string | null | undefined, rawLine: stri
 }
 
 function parseInsertedFromRawFrontend(rawLine: string | null | undefined): number | null {
-  if (typeof rawLine !== "string") return null;
-  const raw = rawLine.trim();
+  const raw = unwrapRawSerialLine(rawLine)?.trim() ?? "";
   if (!raw) return null;
   const m = raw.match(/inserted:\s*php(\d+)/i);
   if (m) return Number.parseInt(m[1], 10);
@@ -505,7 +504,7 @@ export default function Dashboard() {
           product: r.product ?? null,
           paymentStatus: r.paymentStatus ?? null,
           weight: typeof r.weight === "number" ? String(r.weight) : (r.weight ?? null),
-          rawLine: r.rawLine ?? null,
+          rawLine: unwrapRawSerialLine(r.rawLine ?? null) ?? (r.rawLine ?? null),
         }))
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 

@@ -38,6 +38,28 @@ function normalizeEvent(value) {
   return normalizeText(value).replace(/\s+/g, " ");
 }
 
+function unwrapRawLine(value) {
+  if (typeof value !== "string") return "";
+
+  let raw = value.trim();
+  if (!raw) return "";
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!raw.startsWith("{")) break;
+
+    try {
+      const parsed = JSON.parse(raw);
+      const nestedRaw = typeof parsed?.rawLine === "string" ? parsed.rawLine.trim() : "";
+      if (!nestedRaw || nestedRaw === raw) break;
+      raw = nestedRaw;
+    } catch {
+      break;
+    }
+  }
+
+  return raw;
+}
+
 function isPirEventValue(value) {
   const event = normalizeEvent(value);
   return event === "entry" || event === "customer entered" || event === "customer_entered";
@@ -46,14 +68,14 @@ function isPirEventValue(value) {
 function rowLooksLikePir(row) {
   if (isPirEventValue(row?.event)) return true;
   if (typeof row?.rawLine !== "string") return false;
-  const raw = row.rawLine.toLowerCase();
+  const raw = unwrapRawLine(row.rawLine).toLowerCase();
   return /^entry(?:\s*:\s*\d+)?$/i.test(raw) || /^customer(?:\s+|_)entered\b/i.test(raw);
 }
 
 function getPirEventKey(row) {
   if (!rowLooksLikePir(row)) return null;
 
-  const raw = typeof row?.rawLine === "string" ? row.rawLine.trim() : "";
+  const raw = unwrapRawLine(row?.rawLine);
   const entryMatch = raw.match(/^entry\s*:\s*(\d+)$/i);
   if (entryMatch) {
     return `entry:${entryMatch[1]}`;
@@ -79,7 +101,7 @@ function isDuplicateTransaction(store, candidate) {
     if (now - ts > DEDUPE_WINDOW_MS) return false;
 
     return (
-      normalizeText(row.rawLine) === normalizeText(candidate.rawLine) &&
+      normalizeText(unwrapRawLine(row.rawLine)) === normalizeText(unwrapRawLine(candidate.rawLine)) &&
       normalizeText(row.product) === normalizeText(candidate.product) &&
       normalizeText(row.status) === normalizeText(candidate.status) &&
       normalizeText(row.reason) === normalizeText(candidate.reason) &&
@@ -110,13 +132,13 @@ function isDuplicateEvent(store, candidate) {
 
       return (
         normalizeEvent(row.event) === normalizeEvent(candidate.event) &&
-        normalizeText(row.rawLine) === normalizeText(candidate.rawLine)
+          normalizeText(unwrapRawLine(row.rawLine)) === normalizeText(unwrapRawLine(candidate.rawLine))
       );
     }
 
     return (
       normalizeEvent(row.event) === normalizeEvent(candidate.event) &&
-      normalizeText(row.rawLine) === normalizeText(candidate.rawLine) &&
+      normalizeText(unwrapRawLine(row.rawLine)) === normalizeText(unwrapRawLine(candidate.rawLine)) &&
       normalizeText(row.product) === normalizeText(candidate.product) &&
       normalizeText(row.paymentStatus) === normalizeText(candidate.paymentStatus)
     );
@@ -133,12 +155,14 @@ function normalizeProduct(product) {
 }
 
 function parseInsertedFromRaw(rawLine) {
-  if (typeof rawLine !== "string") return null;
-  const raw = rawLine.trim();
+  const raw = unwrapRawLine(rawLine);
+  if (!raw) return null;
   const m = raw.match(/inserted:\s*php(\d+)/i);
   if (m) return Number.parseInt(m[1], 10);
   const m2 = raw.match(/coin\s*:\s*(5|10)\s*pesos/i);
   if (m2) return Number.parseInt(m2[1], 10);
+  const m4 = raw.match(/coin\s+value:\s*(5|10)\b/i);
+  if (m4) return Number.parseInt(m4[1], 10);
   const m3 = raw.match(/php\s*(\d+)\b/i);
   if (m3) return Number.parseInt(m3[1], 10);
   return null;
@@ -182,7 +206,7 @@ module.exports = async function handler(req, res) {
           product: typeof body.product === "string" ? body.product : null,
           paymentStatus: typeof body.paymentStatus === "string" ? body.paymentStatus : null,
           weight: body.weight ?? null,
-          rawLine: body.rawLine ?? null,
+          rawLine: typeof body.rawLine === "string" ? (unwrapRawLine(body.rawLine) || body.rawLine) : null,
         };
 
         const duplicate = isDuplicateEvent(store, candidate);
@@ -223,7 +247,7 @@ module.exports = async function handler(req, res) {
         weight,
         status,
         reason,
-        rawLine: body.rawLine ?? null,
+        rawLine: typeof body.rawLine === "string" ? (unwrapRawLine(body.rawLine) || body.rawLine) : null,
       };
 
       const duplicate = isDuplicateTransaction(store, candidate);
