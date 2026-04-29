@@ -1,45 +1,84 @@
-1. error fix the custoner count 
-[RAW] Distance: 5
-[RAW] Entry: 3
-[SKIP] Event posts disabled; not sending PIR event: entry
-[RAW] Customer Entered
-[SKIP] Non-entry PIR event: customer entered
+using  Vercel for dashboard 
+with Arduino hardware connected via CMD/Serial bridge.
 
-2. 
-fix complete transaction this is the transaction on dashboard.
- Completed Transactions
-5 total
-Timestamp	Product	Price (PHP)	Inserted (PHP)	Status	Reason
-2026-04-29 13:26	P2	PHP 10	PHP 0	FAILED	INSUFFICIENT
-2026-04-29 13:26	P2	PHP 10	PHP 0	FAILED	INSUFFICIENT
-2026-04-29 13:25	P1	PHP 5	PHP 0	FAILED	INSUFFICIENT
-2026-04-29 13:25	P2	PHP 10	PHP 10	SUCCESS	VALID
-2026-04-29 13:25	P1	PHP 5	PHP 5	SUCCESS	VALID
+PROBLEMS:
+1) Transaction logs show insertedAmount = 0 for FAILED transactions
+2) Customer entry (PIR count) is not showing or updating on the dashboard
 
-it should be like this learn the logic focus on insufficient and invalid logic
- Completed Transactions
-5 total
-Timestamp	Product	Price (PHP)	Inserted (PHP)	Status	Reason
-2026-04-29 13:26	P2	PHP 10	PHP 5	FAILED	INSUFFICIENT
-2026-04-29 13:26	P2	PHP 10	PHP 5	FAILED	INSUFFICIENT
-2026-04-29 13:25	P1	PHP 5	PHP 10	FAILED	INVALID
-2026-04-29 13:25	P2	PHP 10	PHP 10	SUCCESS	VALID
-2026-04-29 13:25	P1	PHP 5	PHP 5	SUCCESS	VALID
+==============================
+TRANSACTION BUSINESS RULES
+==============================
 
-3. what is this in dashboard is it important 
-Live Counter API
-live
-0
-current count
-Source: /api/counter
+These rules MUST be followed exactly:
 
-4.this was showen in cmd [RAW] Customer Entered
-[SKIP] Non-entry PIR event: customer entered
-[SENT] event:entry
-if customer enter the entry cound in dashboard increment to 1
+- SUCCESS + VALID
+  → insertedAmount === productPrice
 
-### 
-Make npm run bridge:vercel work cross-platform (optional):
+- FAILED + INSUFFICIENT
+  → insertedAmount < productPrice
 
-Install cross-env:
-Edit package.json script bridge:vercel to:
+- FAILED + INVALID (overpayment)
+  → insertedAmount > productPrice
+
+IMPORTANT:
+- insertedAmount must ALWAYS reflect the real inserted value
+- This applies to BOTH SUCCESS and FAILED transactions
+- insertedAmount must NEVER be reset before logging
+- Reset insertedAmount ONLY AFTER the transaction is saved
+- Do NOT change Arduino or PIR hardware code
+
+Please look for:
+- premature reset of insertedAmount
+- logging only inside SUCCESS branches
+- failure branches that overwrite insertedAmount
+- defaults like `|| 0` or `?? 0` that mask real values
+
+==============================
+ARDUINO → BACKEND SYNC RULES
+==============================
+
+- Arduino sends accumulated values (coins, PIR entries)
+- Backend must log received values AS-IS
+- Backend must NOT assume 0 means failure
+- Backend must NOT recompute values already sent by Arduino
+
+Please inspect:
+- serial parsing logic
+- request body validation
+- fallback/default assignments
+- conditional logic that clears values on failure
+
+==============================
+PIR / CUSTOMER ENTRY ISSUE
+==============================
+
+PROBLEM:
+Customer entry (PIR count) is detected by Arduino
+but is NOT visible or updating on the dashboard.
+
+EXPECTED FLOW:
+PIR Sensor → Arduino → Serial/CMD Bridge → API → Database → Dashboard
+
+Rules:
+- Do NOT modify PIR sensor code
+- Do NOT block PIR updates behind transactions
+- PIR count should be logged independently of purchases
+- Dashboard should fetch and render the latest stored PIR value
+
+Please check:
+- whether PIR data is sent in a separate API request
+- whether PIR updates are ignored when no transaction occurs
+- whether backend saves PIR data without overwriting it
+- whether frontend fetches PIR data on load or polling
+- whether state is cleared or not refreshed on the dashboard
+
+GOAL:
+Fix ONLY logic, sequencing, data handling, and state updates
+so that:
+- FAILED transactions log correct insertedAmount
+- INVALID vs INSUFFICIENT is classified correctly
+- Customer entry (PIR count) consistently appears on dashboard
+
+Do not refactor unrelated code.
+Do not change hardware behavior.
+``

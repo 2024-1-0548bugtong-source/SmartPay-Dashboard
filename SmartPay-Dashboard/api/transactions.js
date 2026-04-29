@@ -123,7 +123,9 @@ module.exports = async function handler(req, res) {
       let inserted = Number(body?.inserted ?? price);
       const weight = body?.weight ?? null;
 
-      if (!Number.isFinite(inserted) || inserted === 0) {
+      // Only treat non-finite values as missing. Do NOT treat `0` as missing
+      // because `0` is a valid inserted amount that must be preserved.
+      if (!Number.isFinite(inserted)) {
         const fromRaw = parseInsertedFromRaw(body?.rawLine ?? "");
         if (Number.isFinite(fromRaw)) inserted = fromRaw;
       }
