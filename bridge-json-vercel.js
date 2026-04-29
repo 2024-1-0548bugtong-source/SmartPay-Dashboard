@@ -6,6 +6,7 @@ const BAUD_RATE = Number(process.env.BAUD_RATE || 9600);
 const VERCEL_BASE_URL = (process.env.VERCEL_BASE_URL || process.argv[3] || "https://honest-pay-dashboard.vercel.app").replace(/\/$/, "");
 const API_URL = `${VERCEL_BASE_URL}/api/transactions`;
 const DEDUPE_WINDOW_MS = Number(process.env.DEDUPE_WINDOW_MS || 2500);
+const PAYMENT_GRACE_MS = Number(process.env.PAYMENT_GRACE_MS || 30000);
 const ALLOW_EVENT_POSTS = process.env.ALLOW_EVENT_POSTS === "true";
 
 /** @typedef {"P1" | "P2"} ProductCode */
@@ -20,6 +21,8 @@ const ALLOW_EVENT_POSTS = process.env.ALLOW_EVENT_POSTS === "true";
  *   weight: number,
  *   failureReason: Exclude<TransactionReason, "VALID"> | null,
  *   pendingCoinValue: number | null,
+ *   startedAtMs: number,
+ *   lastActivityAtMs: number,
  * }} OngoingTransaction
  */
 
@@ -163,10 +166,10 @@ function parseInsertedExplicit(rawLine) {
 }
 
 /**
- * @param {{ status: TransactionStatus, reason: TransactionReason, rawLine: string }} param0
+ * @param {{ status: TransactionStatus, reason: TransactionReason, rawLine: string, timestampMs?: number }} param0
  * @returns {TransactionPayload | null}
  */
-function buildTransactionPayload({ status, reason, rawLine }) {
+function buildTransactionPayload({ status, reason, rawLine, timestampMs }) {
   if (!ongoingTransaction || !ongoingTransaction.product || !Number.isFinite(ongoingTransaction.price)) {
     return null;
   }
@@ -176,7 +179,7 @@ function buildTransactionPayload({ status, reason, rawLine }) {
     : null;
 
   const payload = {
-    timestamp: new Date().toISOString(),
+    timestamp: new Date(timestampMs ?? Date.now()).toISOString(),
     product: ongoingTransaction.product,
     price: ongoingTransaction.price,
     inserted: ongoingTransaction.inserted,
@@ -197,9 +200,10 @@ function buildTransactionPayload({ status, reason, rawLine }) {
 
 /**
  * @param {ParsedEventLine | null | undefined} parsed
+ * @param {number} [nowMs]
  * @returns {TransactionPayload | null}
  */
-function consumeEventTransaction(parsed) {
+function consumeEventTransaction(parsed, nowMs = Date.now()) {
   if (!parsed) return null;
 
   const eventName = normalizeEvent(parsed.event);
@@ -217,6 +221,8 @@ function consumeEventTransaction(parsed) {
         weight: 0,
         failureReason: null,
         pendingCoinValue: null,
+        startedAtMs: nowMs,
+        lastActivityAtMs: nowMs,
       };
     }
     return null;
@@ -232,6 +238,7 @@ function consumeEventTransaction(parsed) {
       }
       ongoingTransaction.weight += parseWeightValue(parsed.weight);
       ongoingTransaction.pendingCoinValue = ongoingTransaction.pendingCoinValue === coinValue ? null : coinValue;
+      ongoingTransaction.lastActivityAtMs = nowMs;
     }
     return null;
   }
@@ -244,6 +251,7 @@ function consumeEventTransaction(parsed) {
         ongoingTransaction.inserted += insertedAmount;
       }
       ongoingTransaction.pendingCoinValue = isDuplicateOfDetectedCoin ? null : insertedAmount;
+      ongoingTransaction.lastActivityAtMs = nowMs;
     }
     return null;
   }
@@ -260,9 +268,11 @@ function consumeEventTransaction(parsed) {
         status: "FAILED",
         reason: ongoingTransaction.failureReason,
         rawLine: parsed.rawLine,
+        timestampMs: nowMs,
       });
     }
 
+    ongoingTransaction.lastActivityAtMs = nowMs;
     return null;
   }
 
@@ -270,6 +280,7 @@ function consumeEventTransaction(parsed) {
     if (!ongoingTransaction.failureReason) {
       ongoingTransaction.failureReason = "INSUFFICIENT";
     }
+    ongoingTransaction.lastActivityAtMs = nowMs;
     return null;
   }
 
@@ -278,15 +289,22 @@ function consumeEventTransaction(parsed) {
       status: "SUCCESS",
       reason: "VALID",
       rawLine: parsed.rawLine,
+      timestampMs: nowMs,
     });
   }
 
   if (eventName === "customer left" || eventName === "honestpay ready") {
+    const elapsedSinceLastActivity = nowMs - ongoingTransaction.lastActivityAtMs;
+    if (elapsedSinceLastActivity < PAYMENT_GRACE_MS) {
+      return null;
+    }
+
     const fallbackReason = ongoingTransaction.inserted < ongoingTransaction.price ? "INSUFFICIENT" : "INVALID";
     return buildTransactionPayload({
       status: "FAILED",
       reason: ongoingTransaction.failureReason || fallbackReason,
       rawLine: parsed.rawLine,
+      timestampMs: nowMs,
     });
   }
 
@@ -672,7 +690,7 @@ async function start() {
       eventName = "entry";
     }
 
-    const payload = consumeEventTransaction(parsed);
+    const payload = consumeEventTransaction(parsed, Date.now());
 
     if (!payload) {
       if (eventName === "entry") {
@@ -726,4 +744,20 @@ async function start() {
   });
 }
 
-start();
+function resetBridgeStateForTests() {
+  lastSentAt = 0;
+  lastPirSentAt = 0;
+  lastKnownInserted = null;
+  ongoingTransaction = null;
+}
+
+if (require.main === module) {
+  start();
+} else {
+  module.exports = {
+    PAYMENT_GRACE_MS,
+    parseSmartPayLine,
+    consumeEventTransaction,
+    resetBridgeStateForTests,
+  };
+}

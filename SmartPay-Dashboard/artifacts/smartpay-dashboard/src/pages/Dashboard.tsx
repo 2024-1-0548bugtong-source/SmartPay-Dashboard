@@ -842,7 +842,7 @@ export default function Dashboard() {
                     <span className="text-2xl">👁</span>
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">PIR Entries Today</span>
                   </div>
-                  {recentPirFlash && <span className="text-green-500 font-bold text-lg animate-bounce">+1 ↑</span>}
+                  {recentPirFlash && <span className="text-green-500 font-bold text-sm animate-bounce uppercase tracking-wide">PIR detected</span>}
                 </div>
                 <div className="flex items-end gap-3 mt-1">
                   <span className="text-4xl font-extrabold text-primary dark:text-blue-400">{displayedPirCount}</span>

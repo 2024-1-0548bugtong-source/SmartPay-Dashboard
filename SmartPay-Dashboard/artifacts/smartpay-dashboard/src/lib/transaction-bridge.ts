@@ -17,9 +17,17 @@ export interface TransactionDraft {
   weight: number;
   failureReason: "INSUFFICIENT" | "INVALID" | null;
   pendingCoinValue: number | null;
+  startedAtMs: number;
+  lastActivityAtMs: number;
 }
 
 const PIR_DEDUPE_WINDOW_MS = 4000;
+export const PAYMENT_GRACE_MS = 30_000;
+
+function parseTimestampMs(timestamp: string): number {
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
 
 function parsePrice(product: string | null): number | null {
   const match = product?.match(/PHP(\d+)/i);
@@ -85,6 +93,7 @@ export function applyRawEventToTransaction(
   row: Pick<RawTransactionEvent, "timestamp" | "event" | "product" | "paymentStatus" | "weight" | "rawLine">
 ): { draft: TransactionDraft | null; completed: TransactionRow | null } {
   const evLower = row.event?.toLowerCase();
+  const eventTimestampMs = parseTimestampMs(row.timestamp);
   if (!evLower) {
     return { draft, completed: null };
   }
@@ -101,6 +110,8 @@ export function applyRawEventToTransaction(
         weight: 0,
         failureReason: null,
         pendingCoinValue: null,
+        startedAtMs: eventTimestampMs,
+        lastActivityAtMs: eventTimestampMs,
       };
     }
     return { draft: nextDraft, completed: null };
@@ -116,6 +127,8 @@ export function applyRawEventToTransaction(
         weight: 0,
         failureReason: null,
         pendingCoinValue: null,
+        startedAtMs: eventTimestampMs,
+        lastActivityAtMs: eventTimestampMs,
       };
     }
     return { draft: nextDraft, completed: null };
@@ -133,6 +146,7 @@ export function applyRawEventToTransaction(
         inserted: nextDraft.pendingCoinValue === coinValue ? nextDraft.inserted : nextDraft.inserted + coinValue,
         weight: nextDraft.weight + parseWeight(row.weight),
         pendingCoinValue: nextDraft.pendingCoinValue === coinValue ? null : coinValue,
+        lastActivityAtMs: eventTimestampMs,
       };
     }
     return { draft: nextDraft, completed: null };
@@ -146,6 +160,7 @@ export function applyRawEventToTransaction(
         ...nextDraft,
         inserted: isDuplicateOfDetectedCoin ? nextDraft.inserted : nextDraft.inserted + insertedAmount,
         pendingCoinValue: isDuplicateOfDetectedCoin ? null : insertedAmount,
+        lastActivityAtMs: eventTimestampMs,
       };
     }
     return { draft: nextDraft, completed: null };
@@ -170,7 +185,7 @@ export function applyRawEventToTransaction(
     }
 
     return {
-      draft: { ...nextDraft, failureReason, pendingCoinValue: null },
+      draft: { ...nextDraft, failureReason, pendingCoinValue: null, lastActivityAtMs: eventTimestampMs },
       completed: null,
     };
   }
@@ -181,6 +196,7 @@ export function applyRawEventToTransaction(
         ...nextDraft,
         failureReason: nextDraft.failureReason ?? "INSUFFICIENT",
         pendingCoinValue: null,
+        lastActivityAtMs: eventTimestampMs,
       },
       completed: null,
     };
@@ -194,6 +210,10 @@ export function applyRawEventToTransaction(
   }
 
   if (evLower === "customer left" || evLower === "honestpay ready") {
+    if (eventTimestampMs - nextDraft.lastActivityAtMs < PAYMENT_GRACE_MS) {
+      return { draft: nextDraft, completed: null };
+    }
+
     const reason = nextDraft.failureReason ?? (nextDraft.inserted < nextDraft.price ? "INSUFFICIENT" : "INVALID");
     return {
       draft: null,
