@@ -342,10 +342,10 @@ function normalizeCompletedApiRows(
             return null;
           }
 
-          const insertedValue = Number.isFinite(finalInserted as number)
-            ? (finalInserted as number)
-            : status === "SUCCESS"
-              ? price
+          const insertedValue = status === "SUCCESS"
+            ? Math.max(Number.isFinite(finalInserted as number) ? (finalInserted as number) : 0, price)
+            : Number.isFinite(finalInserted as number)
+              ? (finalInserted as number)
               : 0;
 
           return {

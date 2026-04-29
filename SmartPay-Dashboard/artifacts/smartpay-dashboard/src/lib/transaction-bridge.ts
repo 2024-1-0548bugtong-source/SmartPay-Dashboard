@@ -26,6 +26,20 @@ export interface TransactionDraft {
 const PIR_DEDUPE_WINDOW_MS = 4000;
 export const PAYMENT_GRACE_MS = 30_000;
 
+function createDraft(product: string, price: number, eventTimestampMs: number): TransactionDraft {
+  return {
+    product,
+    price,
+    inserted: 0,
+    weight: 0,
+    failureReason: null,
+    attemptedCoinValue: null,
+    pendingCoinValue: null,
+    startedAtMs: eventTimestampMs,
+    lastActivityAtMs: eventTimestampMs,
+  };
+}
+
 function parseTimestampMs(timestamp: string): number {
   const parsed = Date.parse(timestamp);
   return Number.isFinite(parsed) ? parsed : Date.now();
@@ -121,11 +135,12 @@ function finalizeDraft(
   reason: "VALID" | "INSUFFICIENT" | "INVALID"
 ): TransactionRow {
   const product = normalizeProductLabel(draft.product) ?? draft.product;
+  const inserted = status === "SUCCESS" ? Math.max(draft.inserted, draft.price) : draft.inserted;
   const rowWithoutId = {
     timestamp,
     product,
     price: draft.price,
-    inserted: draft.inserted,
+    inserted,
     weight: Number(draft.weight.toFixed(2)),
     status,
     reason,
@@ -158,17 +173,7 @@ function upsertDraftFromPrompt(
   const normalizedProduct = normalizeProductLabel(product) ?? product;
 
   if (!draft) {
-    return {
-      product: normalizedProduct,
-      price,
-      inserted: 0,
-      weight: 0,
-      failureReason: null,
-      attemptedCoinValue: null,
-      pendingCoinValue: null,
-      startedAtMs: eventTimestampMs,
-      lastActivityAtMs: eventTimestampMs,
-    };
+    return createDraft(normalizedProduct, price, eventTimestampMs);
   }
 
   const sameProduct = normalizeProductLabel(draft.product) === normalizedProduct;
@@ -179,24 +184,9 @@ function upsertDraftFromPrompt(
     };
   }
 
-  if (draft.inserted > 0) {
-    return {
-      ...draft,
-      lastActivityAtMs: eventTimestampMs,
-    };
-  }
-
-  return {
-    product: normalizedProduct,
-    price,
-    inserted: 0,
-    weight: 0,
-    failureReason: null,
-      attemptedCoinValue: null,
-    pendingCoinValue: null,
-    startedAtMs: eventTimestampMs,
-    lastActivityAtMs: eventTimestampMs,
-  };
+  // A new product prompt takes ownership of the active checkout. Keeping the
+  // previous draft causes the next terminal line to be attributed to the wrong product.
+  return createDraft(normalizedProduct, price, eventTimestampMs);
 }
 
 export function applyRawEventToTransaction(
@@ -310,7 +300,7 @@ export function applyRawEventToTransaction(
     };
   }
 
-  if (evLower === "payment ok") {
+  if (evLower === "payment ok" || evLower === "dispensing product") {
     return {
       draft: null,
       completed: finalizeDraft(nextDraft, row.timestamp, "SUCCESS", "VALID"),
