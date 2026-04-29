@@ -376,7 +376,7 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
       weight: null,
       rawLine: raw,
       isLogEntry: true,
-      isPirEntry: false,
+      isPirEntry: true,
       lcdState: { line1: lcdPad("Customer Entered"), line2: lcdPad("  Please wait..."), theme: "entry" },
     };
   }

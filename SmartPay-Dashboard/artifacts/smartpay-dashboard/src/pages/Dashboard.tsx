@@ -545,7 +545,11 @@ export default function Dashboard() {
       setTimeout(() => setRecentPirFlash(false), 1500);
     }
 
-    if (parsed.isLogEntry && transactionsApiModeRef.current === "raw-events") {
+    const shouldPersistRawEvent = parsed.isLogEntry && (
+      transactionsApiModeRef.current === "raw-events" || parsed.isPirEntry
+    );
+
+    if (shouldPersistRawEvent) {
       fetch("/api/transactions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
