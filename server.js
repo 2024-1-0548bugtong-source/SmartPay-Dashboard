@@ -67,8 +67,18 @@ function isPirEvent(value) {
 
 /** @param {StoredTransactionRow[]} rows */
 function computePirCount(rows) {
+  function rowLooksLikePir(row) {
+    if (isPirEvent(row?.event)) return true;
+    if (typeof row?.rawLine !== "string") return false;
+    const raw = row.rawLine.toLowerCase();
+    if (/^entry:\s*\d+/i.test(raw)) return true;
+    if (/\bcustomer entered\b/i.test(raw)) return true;
+    if (/\bentry\b/i.test(raw)) return true;
+    return false;
+  }
+
   const sortedRows = rows
-    .filter((row) => isPirEvent(row.event))
+    .filter((row) => rowLooksLikePir(row))
     .slice()
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
 

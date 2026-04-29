@@ -1,7 +1,7 @@
 const { SerialPort } = require("serialport");
 const { ReadlineParser } = require("@serialport/parser-readline");
 
-const SERIAL_PORT = process.env.SERIAL_PORT || process.argv[2] || "COM5";
+const REQUESTED_SERIAL_PORT = process.argv[2] || process.env.SERIAL_PORT || "auto";
 const BAUD_RATE = Number(process.env.BAUD_RATE || 9600);
 const VERCEL_BASE_URL = (process.env.VERCEL_BASE_URL || process.argv[3] || "https://honest-pay-dashboard.vercel.app").replace(/\/$/, "");
 const API_URL = `${VERCEL_BASE_URL}/api/transactions`;
@@ -541,16 +541,32 @@ function shouldDropPirDuplicate(nowMs) {
   return false;
 }
 
-function start() {
-  const port = new SerialPort({
-    path: SERIAL_PORT,
-    baudRate: BAUD_RATE,
-  });
+async function start() {
+    let portPath = REQUESTED_SERIAL_PORT;
+    if (!portPath || portPath === "auto") {
+      try {
+        const ports = await SerialPort.list();
+        if (!ports || ports.length === 0) {
+          console.error("Serial error: No serial ports found to open");
+          process.exit(1);
+        }
+        console.log(`[AUTO] Serial ports detected: ${ports.map(p => p.path).join(', ')}`);
+        portPath = ports[0].path;
+      } catch (err) {
+        console.error("Serial error while listing ports:", err && err.message ? err.message : err);
+        process.exit(1);
+      }
+    }
+
+    const port = new SerialPort({
+      path: portPath,
+      baudRate: BAUD_RATE,
+    });
 
   const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 
   port.on("open", () => {
-    console.log(`Bridge connected on ${SERIAL_PORT} @ ${BAUD_RATE}`);
+    console.log(`Bridge connected on ${portPath} @ ${BAUD_RATE}`);
     console.log(`Forwarding JSON events to ${API_URL}`);
   });
 

@@ -15,7 +15,7 @@ Option A — Recommended: Vercel Git integration (auto-deploy)
 git checkout main
 git pull origin main
 git add -A
-git commit -m "fix: <brief description of fix>"
+git commit -m "pir entry count"
 git push origin main
 ```
 
@@ -73,13 +73,14 @@ pm2 restart honestpay
 Restart the serial bridge (so it sends events to the updated API endpoint):
 
 ```bash
-# Always connect to the Vercel dashboard (production)
+# Always connect to the Vercel dashboard (production). The bridge will auto-detect a serial port when possible.
 npm run bridge:vercel
 
 # Or run the helper script (specify serial device if needed):
-./scripts/start-bridge-vercel.sh /dev/ttyACM0
+./scripts/start-bridge-vercel.sh COM3   # Windows example
+./scripts/start-bridge-vercel.sh /dev/ttyUSB0  # Linux example
 
-# (For local testing only) point to localhost instead:
+# (For local testing only) point to localhost instead (explicit device):
 ALLOW_EVENT_POSTS=true node bridge-json-vercel.js /dev/ttyACM0 http://localhost:3000
 ```
 
