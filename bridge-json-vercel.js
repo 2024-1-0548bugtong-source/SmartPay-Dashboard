@@ -8,6 +8,7 @@ const API_URL = `${VERCEL_BASE_URL}/api/transactions`;
 const DEDUPE_WINDOW_MS = Number(process.env.DEDUPE_WINDOW_MS || 2500);
 const PAYMENT_GRACE_MS = Number(process.env.PAYMENT_GRACE_MS || 30000);
 const ALLOW_EVENT_POSTS = process.env.ALLOW_EVENT_POSTS === "true";
+const SUMMARY_GRACE_MS = Number(process.env.SUMMARY_GRACE_MS || 4000);
 
 /** @typedef {"P1" | "P2"} ProductCode */
 /** @typedef {"SUCCESS" | "FAILED"} TransactionStatus */
@@ -72,6 +73,8 @@ let lastPirSentAt = 0;
 let lastKnownInserted = null;
 /** @type {OngoingTransaction | null} */
 let ongoingTransaction = null;
+/** @type {{ payload: TransactionPayload, timeout: NodeJS.Timeout } | null} */
+let pendingDerivedTransaction = null;
 
 const verboseTelemetryRuntime = {
   lastCoinValue: 0,
@@ -660,6 +663,46 @@ async function postToVercel(payload) {
   return text;
 }
 
+function clearPendingDerivedTransaction() {
+  if (!pendingDerivedTransaction) return;
+  clearTimeout(pendingDerivedTransaction.timeout);
+  pendingDerivedTransaction = null;
+}
+
+/**
+ * @param {TransactionPayload} payload
+ * @param {string} label
+ */
+async function postCompletedTransaction(payload, label) {
+  const now = Date.now();
+  if (shouldDropDuplicate(now)) {
+    console.warn(`[SKIP] Duplicate completed transaction within dedupe window: ${payload.status.toLowerCase()}`);
+    return;
+  }
+
+  try {
+    await postToVercel(payload);
+    console.log(`[SENT] ${label}`);
+  } catch (err) {
+    console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** @param {TransactionPayload} payload */
+function queueDerivedTransaction(payload) {
+  clearPendingDerivedTransaction();
+
+  const timeout = setTimeout(async () => {
+    const pending = pendingDerivedTransaction;
+    pendingDerivedTransaction = null;
+
+    if (!pending) return;
+    await postCompletedTransaction(pending.payload, `transaction:${pending.payload.status.toLowerCase()}`);
+  }, SUMMARY_GRACE_MS);
+
+  pendingDerivedTransaction = { payload, timeout };
+}
+
 /** @param {number} nowMs */
 function shouldDropDuplicate(nowMs) {
   if (nowMs - lastSentAt < DEDUPE_WINDOW_MS) {
@@ -730,11 +773,7 @@ async function start() {
 
     if (parsed.kind === "transaction") {
       const transaction = parsed;
-      const now = Date.now();
-      if (shouldDropDuplicate(now)) {
-        console.warn("[SKIP] Duplicate transaction within dedupe window");
-        return;
-      }
+      clearPendingDerivedTransaction();
 
       if (!transaction.product || transaction.price === null) {
         console.warn("[SKIP] Transaction line missing normalized product or price");
@@ -752,12 +791,7 @@ async function start() {
         rawLine: transaction.rawLine,
       };
 
-      try {
-        await postToVercel(payload);
-        console.log(`[SENT] transaction:${payload.status.toLowerCase()}`);
-      } catch (err) {
-        console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
-      }
+      await postCompletedTransaction(payload, `transaction:${payload.status.toLowerCase()}`);
       return;
     }
 
@@ -816,18 +850,7 @@ async function start() {
       return;
     }
 
-    const now = Date.now();
-    if (shouldDropDuplicate(now)) {
-      console.warn(`[SKIP] Duplicate completed transaction within dedupe window: ${payload.status.toLowerCase()}`);
-      return;
-    }
-
-    try {
-      await postToVercel(payload);
-      console.log(`[SENT] transaction:${payload.status.toLowerCase()}`);
-    } catch (err) {
-      console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
-    }
+    queueDerivedTransaction(payload);
   });
 }
 
@@ -836,6 +859,7 @@ function resetBridgeStateForTests() {
   lastPirSentAt = 0;
   lastKnownInserted = null;
   ongoingTransaction = null;
+  clearPendingDerivedTransaction();
 }
 
 if (require.main === module) {

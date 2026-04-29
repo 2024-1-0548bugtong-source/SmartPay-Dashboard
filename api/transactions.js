@@ -4,6 +4,7 @@ const MAX_ROWS = 1000;
 const DEDUPE_WINDOW_MS = 3000;
 const EVENT_DEDUPE_WINDOW_MS = 1500;
 const PIR_EVENT_DEDUPE_WINDOW_MS = 4000;
+const TRANSACTION_COLLISION_WINDOW_MS = 15000;
 
 function getStore() {
   if (!globalThis.__honestpayTransactions) {
@@ -109,6 +110,72 @@ function isDuplicateTransaction(store, candidate) {
       String(row.inserted ?? "") === String(candidate.inserted ?? "")
     );
   });
+}
+
+function isExplicitTransactionSummary(row) {
+  return /^transaction:(success|failed):/i.test(unwrapRawLine(row?.rawLine));
+}
+
+function pickPreferredTransactionRow(current, candidate) {
+  const currentSummary = isExplicitTransactionSummary(current);
+  const candidateSummary = isExplicitTransactionSummary(candidate);
+
+  if (currentSummary !== candidateSummary) {
+    return candidateSummary ? candidate : current;
+  }
+
+  const currentSuccess = normalizeText(current.status) === "success" && normalizeText(current.reason) === "valid";
+  const candidateSuccess = normalizeText(candidate.status) === "success" && normalizeText(candidate.reason) === "valid";
+
+  if (currentSuccess !== candidateSuccess) {
+    return candidateSuccess ? candidate : current;
+  }
+
+  if (Number(candidate.inserted ?? 0) !== Number(current.inserted ?? 0)) {
+    return Number(candidate.inserted ?? 0) > Number(current.inserted ?? 0) ? candidate : current;
+  }
+
+  if (Number(candidate.weight ?? 0) !== Number(current.weight ?? 0)) {
+    return Number(candidate.weight ?? 0) > Number(current.weight ?? 0) ? candidate : current;
+  }
+
+  return normalizeText(unwrapRawLine(candidate.rawLine)).length > normalizeText(unwrapRawLine(current.rawLine)).length
+    ? candidate
+    : current;
+}
+
+function findTransactionCollision(store, candidate) {
+  const now = Date.now();
+
+  for (let index = 0; index < store.length; index += 1) {
+    const row = store[index];
+    if (!row || typeof row.event === "string") continue;
+
+    const ts = Date.parse(row.timestamp);
+    if (!Number.isFinite(ts)) continue;
+    if (now - ts > TRANSACTION_COLLISION_WINDOW_MS) continue;
+
+    const sameProduct = normalizeText(row.product) === normalizeText(candidate.product);
+    const samePrice = String(row.price ?? "") === String(candidate.price ?? "");
+    if (!sameProduct || !samePrice) continue;
+
+    const sameOutcome =
+      normalizeText(row.status) === normalizeText(candidate.status) &&
+      normalizeText(row.reason) === normalizeText(candidate.reason);
+
+    const summaryConflict = isExplicitTransactionSummary(row) !== isExplicitTransactionSummary(candidate);
+
+    if (!sameOutcome && !summaryConflict) continue;
+
+    const preferred = pickPreferredTransactionRow(row, candidate);
+    return {
+      index,
+      row,
+      replace: preferred === candidate,
+    };
+  }
+
+  return null;
 }
 
 function isDuplicateEvent(store, candidate) {
@@ -253,6 +320,25 @@ module.exports = async function handler(req, res) {
       const duplicate = isDuplicateTransaction(store, candidate);
       if (duplicate) {
         return sendJson(res, 200, { ok: true, duplicate: true, row: duplicate });
+      }
+
+      const collision = findTransactionCollision(store, candidate);
+      if (collision) {
+        if (!collision.replace) {
+          return sendJson(res, 200, { ok: true, duplicate: true, row: collision.row });
+        }
+
+        const row = {
+          id: Date.now(),
+          timestamp: body.timestamp ? new Date(body.timestamp).toISOString() : new Date().toISOString(),
+          ...candidate,
+        };
+
+        store.splice(collision.index, 1);
+        store.unshift(row);
+        if (store.length > MAX_ROWS) store.length = MAX_ROWS;
+
+        return sendJson(res, 201, { ok: true, duplicate: false, replaced: true, row });
       }
 
       const row = {
