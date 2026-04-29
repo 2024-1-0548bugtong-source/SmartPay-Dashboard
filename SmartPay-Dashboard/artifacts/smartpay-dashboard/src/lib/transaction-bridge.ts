@@ -104,6 +104,11 @@ function finalizeDraft(
   };
 }
 
+function deriveFailedReason(draft: TransactionDraft): "INSUFFICIENT" | "INVALID" {
+  // Numeric comparison always wins for failed transactions.
+  return draft.inserted > draft.price ? "INVALID" : "INSUFFICIENT";
+}
+
 function upsertDraftFromPrompt(
   draft: TransactionDraft | null,
   product: string,
@@ -229,10 +234,7 @@ export function applyRawEventToTransaction(
 
   if (evLower === "invalid coin") {
     const paymentStatus = row.paymentStatus?.toLowerCase();
-    const failureReason =
-      paymentStatus === "no coin detected" || /payment invalid|invalid coin/i.test(row.rawLine ?? "")
-        ? "INVALID"
-        : "INSUFFICIENT";
+    const failureReason = deriveFailedReason(nextDraft);
     const isTerminalInvalid =
       paymentStatus === "no coin detected" ||
       paymentStatus === "insufficient" ||
@@ -255,7 +257,7 @@ export function applyRawEventToTransaction(
     return {
       draft: {
         ...nextDraft,
-        failureReason: nextDraft.failureReason ?? "INSUFFICIENT",
+        failureReason: deriveFailedReason(nextDraft),
         pendingCoinValue: null,
         lastActivityAtMs: eventTimestampMs,
       },
@@ -275,7 +277,7 @@ export function applyRawEventToTransaction(
       return { draft: nextDraft, completed: null };
     }
 
-    const reason = nextDraft.failureReason ?? (nextDraft.inserted < nextDraft.price ? "INSUFFICIENT" : "INVALID");
+    const reason = deriveFailedReason(nextDraft);
     return {
       draft: null,
       completed: finalizeDraft(nextDraft, row.timestamp, "FAILED", reason),
