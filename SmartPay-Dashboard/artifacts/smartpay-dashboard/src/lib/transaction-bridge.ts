@@ -104,6 +104,54 @@ function finalizeDraft(
   };
 }
 
+function upsertDraftFromPrompt(
+  draft: TransactionDraft | null,
+  product: string,
+  price: number,
+  eventTimestampMs: number
+): TransactionDraft {
+  const normalizedProduct = normalizeProductLabel(product) ?? product;
+
+  if (!draft) {
+    return {
+      product: normalizedProduct,
+      price,
+      inserted: 0,
+      weight: 0,
+      failureReason: null,
+      pendingCoinValue: null,
+      startedAtMs: eventTimestampMs,
+      lastActivityAtMs: eventTimestampMs,
+    };
+  }
+
+  const sameProduct = normalizeProductLabel(draft.product) === normalizedProduct;
+  if (sameProduct) {
+    return {
+      ...draft,
+      lastActivityAtMs: eventTimestampMs,
+    };
+  }
+
+  if (draft.inserted > 0) {
+    return {
+      ...draft,
+      lastActivityAtMs: eventTimestampMs,
+    };
+  }
+
+  return {
+    product: normalizedProduct,
+    price,
+    inserted: 0,
+    weight: 0,
+    failureReason: null,
+    pendingCoinValue: null,
+    startedAtMs: eventTimestampMs,
+    lastActivityAtMs: eventTimestampMs,
+  };
+}
+
 export function applyRawEventToTransaction(
   draft: TransactionDraft | null,
   row: Pick<RawTransactionEvent, "timestamp" | "event" | "product" | "paymentStatus" | "weight" | "rawLine">
@@ -120,34 +168,16 @@ export function applyRawEventToTransaction(
     const product = normalizeProductLabel(row.product);
     const price = parsePrice(product);
     if (price !== null) {
-      nextDraft = {
-        product: product ?? row.product,
-        price,
-        inserted: 0,
-        weight: 0,
-        failureReason: null,
-        pendingCoinValue: null,
-        startedAtMs: eventTimestampMs,
-        lastActivityAtMs: eventTimestampMs,
-      };
+      nextDraft = upsertDraftFromPrompt(draft, product ?? row.product, price, eventTimestampMs);
     }
     return { draft: nextDraft, completed: null };
   }
 
-  if (evLower.startsWith("pay ") && row.product && !nextDraft) {
+  if (evLower.startsWith("pay ") && row.product) {
     const product = normalizeProductLabel(row.product);
     const price = parsePrice(product);
     if (price !== null) {
-      nextDraft = {
-        product: product ?? row.product,
-        price,
-        inserted: 0,
-        weight: 0,
-        failureReason: null,
-        pendingCoinValue: null,
-        startedAtMs: eventTimestampMs,
-        lastActivityAtMs: eventTimestampMs,
-      };
+      nextDraft = upsertDraftFromPrompt(draft, product ?? row.product, price, eventTimestampMs);
     }
     return { draft: nextDraft, completed: null };
   }
