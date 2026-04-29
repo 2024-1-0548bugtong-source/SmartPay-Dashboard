@@ -1,3 +1,4 @@
+import { formatProductLabel } from "./serial";
 import type { LcdState } from "./serial";
 
 /**
@@ -33,7 +34,12 @@ export function loadTransactions(): TransactionRow[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as TransactionRow[];
+
+    const parsed = JSON.parse(raw) as TransactionRow[];
+    return parsed.map((row) => ({
+      ...row,
+      product: formatProductLabel(row.product) ?? row.product,
+    }));
   } catch {
     return [];
   }
@@ -41,7 +47,15 @@ export function loadTransactions(): TransactionRow[] {
 
 export function saveTransactions(rows: TransactionRow[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(rows.slice(0, 1000)));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(
+        rows.slice(0, 1000).map((row) => ({
+          ...row,
+          product: formatProductLabel(row.product) ?? row.product,
+        }))
+      )
+    );
   } catch {
     // ignore storage quota errors
   }
