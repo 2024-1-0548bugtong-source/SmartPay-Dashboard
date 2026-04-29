@@ -4,7 +4,7 @@ import {
 } from "recharts";
 import {
   loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
-  exportCsv, computeStats, type TransactionRow,
+  exportCsv, computeStats, loadPirCounter, savePirCounter, incrementPirCounter, type TransactionRow,
 } from "@/lib/storage";
 import { PRODUCT_CATALOG, formatProductLabel, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
 import {
@@ -270,6 +270,19 @@ function parseTimestampMs(value: string | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function getCanonicalPirEntryKey(event: string | null | undefined, rawLine: string | null | undefined): string | null {
+  const raw = typeof rawLine === "string" ? rawLine.trim() : "";
+  const entryMatch = raw.match(/^entry\s*:\s*(\d+)$/i);
+  if (entryMatch) return `entry:${entryMatch[1]}`;
+
+  const normalizedEvent = typeof event === "string" ? event.trim().toLowerCase() : "";
+  if (normalizedEvent === "entry") {
+    return raw ? `entry:${raw.toLowerCase()}` : "entry";
+  }
+
+  return null;
+}
+
 function parseInsertedFromRawFrontend(rawLine: string | null | undefined): number | null {
   if (typeof rawLine !== "string") return null;
   const raw = rawLine.trim();
@@ -357,11 +370,11 @@ function normalizeCompletedApiRows(
 export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(loadDarkMode);
   const [transactions, setTransactions] = useState<TransactionRow[]>(() => loadTransactions());
-  const [localPirCount, setLocalPirCount] = useState(0);
-  // `entryCount` is the canonical counter shown in the UI and MUST be
-  // updated only from the /api/counter GET poll. Do not derive it from
-  // transactions or local serial lines.
-  const [entryCount, setEntryCount] = useState(0);
+  const initialPirCountRef = useRef(loadPirCounter().count);
+  const [localPirCount, setLocalPirCount] = useState(initialPirCountRef.current);
+  // The visible PIR counter is monotonic for the current day. Local Entry
+  // signals can raise it immediately; /api/counter can only raise it further.
+  const [entryCount, setEntryCount] = useState(initialPirCountRef.current);
   const [counterStatus, setCounterStatus] = useState("loading");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
   const [showManualEntry, setShowManualEntry] = useState(false);
@@ -378,6 +391,8 @@ export default function Dashboard() {
   const transactionsApiModeRef = useRef<TransactionsApiMode>(defaultTransactionsApiMode());
   const clearedAtRef = useRef(0);
   const lastCounterPirTimestampRef = useRef(0);
+  const localPirCountRef = useRef(initialPirCountRef.current);
+  const lastLocalPirKeyRef = useRef<string | null>(null);
 
   const sm = useStateMachine();
   const effectiveLcdState = serialLcdState ?? sm.lcdState;
@@ -391,8 +406,14 @@ export default function Dashboard() {
   // ── Persist transactions ──
   useEffect(() => { saveTransactions(transactions); }, [transactions]);
 
-  // ── PIR count — only updated from the live counter API
-  const displayedPirCount = entryCount;
+  // ── Persist PIR counter floor ──
+  useEffect(() => {
+    localPirCountRef.current = localPirCount;
+    savePirCounter({ count: localPirCount, date: loadPirCounter().date });
+  }, [localPirCount]);
+
+  // ── PIR count — merged from local Entry signals plus live /api/counter
+  const displayedPirCount = Math.max(entryCount, localPirCount);
 
   // ── Live counter from deployed Vercel API ──
   useEffect(() => {
@@ -422,12 +443,16 @@ export default function Dashboard() {
             lastCounterPirTimestampRef.current = latestPirTimestampMs;
           }
 
-          // Only update the canonical entry counter from the API.
+          const mergedCount = Math.max(data.count, localPirCountRef.current);
+
+          // Live API may lag or cold-start back to zero. Only let it raise
+          // the displayed counter, never overwrite the local floor.
+          setLocalPirCount((prev) => Math.max(prev, mergedCount));
           setEntryCount((prev) => {
             if (data.count === 0 && latestPirTimestampMs === 0 && clearedAtRef.current > 0) {
               return 0;
             }
-            return Math.max(prev, data.count);
+            return Math.max(prev, mergedCount);
           });
           setCounterStatus("live");
         } else {
@@ -534,6 +559,7 @@ export default function Dashboard() {
     sm.ping();
 
     const eventTimestamp = new Date().toISOString();
+    const eventTimestampMs = parseTimestampMs(eventTimestamp);
 
     // Apply to state machine
     const trigger = eventToTrigger(parsed.event, parsed.paymentStatus);
@@ -544,9 +570,21 @@ export default function Dashboard() {
 
     // PIR counter increment
     if (parsed.isPirEntry) {
-      // Visual flash only; do NOT update the canonical entry counter here.
+      // `Entry: N` is the authoritative customer-attempt signal from hardware.
+      // Raise the local floor immediately so the UI stays monotonic even if
+      // /api/counter briefly lags, restarts, or returns stale data.
       setRecentPirFlash(true);
       setTimeout(() => setRecentPirFlash(false), 1500);
+
+      const pirEntryKey = getCanonicalPirEntryKey(parsed.event, parsed.rawLine);
+      if (pirEntryKey && pirEntryKey !== lastLocalPirKeyRef.current) {
+        lastLocalPirKeyRef.current = pirEntryKey;
+        const nextPirCounter = incrementPirCounter({ count: localPirCountRef.current, date: loadPirCounter().date });
+        localPirCountRef.current = nextPirCounter.count;
+        setLocalPirCount(nextPirCounter.count);
+        setEntryCount((prev) => Math.max(prev, nextPirCounter.count));
+        lastCounterPirTimestampRef.current = Math.max(lastCounterPirTimestampRef.current, eventTimestampMs);
+      }
     }
 
     const shouldPersistRawEvent = parsed.isLogEntry && (
@@ -775,6 +813,8 @@ export default function Dashboard() {
                 ongoingTransactionRef.current = null;
                 clearedAtRef.current = Date.now();
                 lastCounterPirTimestampRef.current = 0;
+                localPirCountRef.current = 0;
+                lastLocalPirKeyRef.current = null;
                 setTransactions([]);
                 setEntryCount(0);
                 // Clear local-only PIR counter used for offline/debug display.
