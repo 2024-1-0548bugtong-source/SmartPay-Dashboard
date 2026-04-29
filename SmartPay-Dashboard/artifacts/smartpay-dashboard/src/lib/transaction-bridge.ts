@@ -1,3 +1,4 @@
+import { formatProductLabel } from "./serial";
 import type { TransactionRow } from "./storage";
 
 export interface RawTransactionEvent {
@@ -34,30 +35,44 @@ function parsePrice(product: string | null): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
+function normalizeProductLabel(product: string | null): string | null {
+  return formatProductLabel(product) ?? product;
+}
+
 function parseWeight(weight: string | null): number {
   if (!weight) return 0;
   const parsed = parseFloat(weight);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function parseInsertedAmount(rawLine: string | null, product: string | null): number | null {
+function parseInsertedSignal(
+  rawLine: string | null,
+  product: string | null
+): { amount: number; mode: "absolute" | "increment" } | null {
   const insertedMatch = rawLine?.match(/inserted:\s*php(\d+)/i);
   if (insertedMatch) {
-    return parseInt(insertedMatch[1], 10);
+    return { amount: parseInt(insertedMatch[1], 10), mode: "absolute" };
   }
 
   const contractInsertMatch = rawLine?.match(/coin\s*:\s*(5|10)\s*pesos/i);
   if (contractInsertMatch) {
-    return parseInt(contractInsertMatch[1], 10);
+    return { amount: parseInt(contractInsertMatch[1], 10), mode: "increment" };
   }
 
-  return parsePrice(product);
+  const parsedPrice = parsePrice(product);
+  return parsedPrice === null ? null : { amount: parsedPrice, mode: "increment" };
+}
+
+function timestampKey(timestamp: string): string {
+  const parsed = parseTimestampMs(timestamp);
+  if (!Number.isFinite(parsed)) return timestamp;
+  return new Date(Math.floor(parsed / 1000) * 1000).toISOString();
 }
 
 function buildTransactionId(row: Omit<TransactionRow, "id" | "rawLine">): string {
   return [
-    row.timestamp,
-    row.product,
+    timestampKey(row.timestamp),
+    normalizeProductLabel(row.product),
     row.price,
     row.inserted,
     row.status,
@@ -71,9 +86,10 @@ function finalizeDraft(
   status: "SUCCESS" | "FAILED",
   reason: "VALID" | "INSUFFICIENT" | "INVALID"
 ): TransactionRow {
+  const product = normalizeProductLabel(draft.product) ?? draft.product;
   const rowWithoutId = {
     timestamp,
-    product: draft.product,
+    product,
     price: draft.price,
     inserted: draft.inserted,
     weight: Number(draft.weight.toFixed(2)),
@@ -101,10 +117,11 @@ export function applyRawEventToTransaction(
   let nextDraft = draft;
 
   if (evLower.includes("product removed") && row.product) {
-    const price = parsePrice(row.product);
+    const product = normalizeProductLabel(row.product);
+    const price = parsePrice(product);
     if (price !== null) {
       nextDraft = {
-        product: row.product,
+        product: product ?? row.product,
         price,
         inserted: 0,
         weight: 0,
@@ -118,10 +135,11 @@ export function applyRawEventToTransaction(
   }
 
   if (evLower.startsWith("pay ") && row.product && !nextDraft) {
-    const price = parsePrice(row.product);
+    const product = normalizeProductLabel(row.product);
+    const price = parsePrice(product);
     if (price !== null) {
       nextDraft = {
-        product: row.product,
+        product: product ?? row.product,
         price,
         inserted: 0,
         weight: 0,
@@ -139,7 +157,8 @@ export function applyRawEventToTransaction(
   }
 
   if (evLower === "coin detected" && row.product) {
-    const coinValue = parsePrice(row.product);
+    const normalizedProduct = normalizeProductLabel(row.product);
+    const coinValue = parsePrice(normalizedProduct);
     if (coinValue !== null) {
       nextDraft = {
         ...nextDraft,
@@ -153,13 +172,25 @@ export function applyRawEventToTransaction(
   }
 
   if (evLower === "inserted balance") {
-    const insertedAmount = parseInsertedAmount(row.rawLine, row.product);
-    if (insertedAmount !== null) {
-      const isDuplicateOfDetectedCoin = nextDraft.pendingCoinValue === insertedAmount;
+    const insertedSignal = parseInsertedSignal(row.rawLine, row.product);
+    if (insertedSignal !== null) {
+      const isDuplicateOfDetectedCoin =
+        insertedSignal.mode === "increment" && nextDraft.pendingCoinValue === insertedSignal.amount;
+
       nextDraft = {
         ...nextDraft,
-        inserted: isDuplicateOfDetectedCoin ? nextDraft.inserted : nextDraft.inserted + insertedAmount,
-        pendingCoinValue: isDuplicateOfDetectedCoin ? null : insertedAmount,
+        inserted:
+          insertedSignal.mode === "absolute"
+            ? Math.max(nextDraft.inserted, insertedSignal.amount)
+            : isDuplicateOfDetectedCoin
+              ? nextDraft.inserted
+              : nextDraft.inserted + insertedSignal.amount,
+        pendingCoinValue:
+          insertedSignal.mode === "absolute"
+            ? null
+            : isDuplicateOfDetectedCoin
+              ? null
+              : insertedSignal.amount,
         lastActivityAtMs: eventTimestampMs,
       };
     }

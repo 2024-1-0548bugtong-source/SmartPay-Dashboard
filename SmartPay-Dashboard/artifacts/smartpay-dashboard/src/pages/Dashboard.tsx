@@ -6,7 +6,7 @@ import {
   loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
   exportCsv, computeStats, type TransactionRow,
 } from "@/lib/storage";
-import { PRODUCT_CATALOG, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
+import { PRODUCT_CATALOG, formatProductLabel, parseSerialLine, lcdPad, type LcdState } from "@/lib/serial";
 import {
   applyRawEventToTransaction,
   buildCompletedTransactionsFromEvents,
@@ -298,7 +298,7 @@ function normalizeCompletedApiRows(
 ): TransactionRow[] {
   return rows
     .map((row) => {
-      const product = typeof row.product === "string" ? row.product : null;
+      const product = formatProductLabel(typeof row.product === "string" ? row.product : null);
       const status = row.status === "SUCCESS" || row.status === "FAILED" ? row.status : null;
       const reason =
         row.reason === "VALID" || row.reason === "INSUFFICIENT" || row.reason === "INVALID"
@@ -330,7 +330,11 @@ function normalizeCompletedApiRows(
             return null;
           }
 
-          const insertedValue = Number.isFinite(finalInserted as number) ? (finalInserted as number) : price;
+          const insertedValue = Number.isFinite(finalInserted as number)
+            ? (finalInserted as number)
+            : status === "SUCCESS"
+              ? price
+              : 0;
 
           return {
             id: String(row.id),
