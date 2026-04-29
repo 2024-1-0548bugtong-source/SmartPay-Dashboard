@@ -30,7 +30,8 @@ interface PersistedTransactionsEnvelope {
   rows: TransactionRow[];
 }
 
-const STORAGE_KEY = "smartpay_transactions";
+const STORAGE_KEY = "smartpay_transactions_v2";
+const LEGACY_STORAGE_KEY = "smartpay_transactions";
 const DARK_MODE_KEY = "smartpay_dark_mode";
 const PIR_KEY = "smartpay_pir_counter";
 const CLEARED_AT_KEY = "smartpay_cleared_at";
@@ -72,18 +73,29 @@ function isPersistedTransactionsEnvelope(value: unknown): value is PersistedTran
 export function loadTransactions(clearedAt = loadClearedAt()): TransactionRow[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
 
-    const parsed = JSON.parse(raw) as unknown;
-
-    if (isPersistedTransactionsEnvelope(parsed)) {
-      return normalizeTransactionRows(parsed.rows, Math.max(clearedAt, parsed.clearedAt));
+      if (isPersistedTransactionsEnvelope(parsed)) {
+        return normalizeTransactionRows(parsed.rows, Math.max(clearedAt, parsed.clearedAt));
+      }
     }
 
-    // Explicit legacy migration path: pre-versioned builds stored a bare array.
-    // Accept it once, but always filter it against the current clear cutoff.
-    if (Array.isArray(parsed)) {
-      return normalizeTransactionRows(parsed as TransactionRow[], clearedAt);
+    const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!legacyRaw) return [];
+
+    const legacyParsed = JSON.parse(legacyRaw) as unknown;
+
+    // Only accept legacy storage when it already matches the current
+    // envelope schema. Plain array payloads are ignored so older bundles
+    // cannot resurrect stale rows into the current reducer state.
+    if (isPersistedTransactionsEnvelope(legacyParsed)) {
+      const normalizedRows = normalizeTransactionRows(legacyParsed.rows, Math.max(clearedAt, legacyParsed.clearedAt));
+      saveTransactions(normalizedRows, Math.max(clearedAt, legacyParsed.clearedAt));
+      try {
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      } catch {}
+      return normalizedRows;
     }
 
     return [];
@@ -101,12 +113,16 @@ export function saveTransactions(rows: TransactionRow[], clearedAt = loadCleared
     };
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
   } catch {
     // ignore storage quota errors
   }
 }
 
 export function clearTransactionsStorage(clearedAt: number): void {
+  try {
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {}
   saveTransactions([], clearedAt);
 }
 
@@ -157,12 +173,20 @@ export function loadClearedAt(): number {
     const parsed = raw ? Number.parseInt(raw, 10) : 0;
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
 
-    const transactionsRaw = localStorage.getItem(STORAGE_KEY);
-    if (!transactionsRaw) return 0;
+    const currentTransactionsRaw = localStorage.getItem(STORAGE_KEY);
+    if (currentTransactionsRaw) {
+      const currentTransactionsParsed = JSON.parse(currentTransactionsRaw) as unknown;
+      if (isPersistedTransactionsEnvelope(currentTransactionsParsed)) {
+        return currentTransactionsParsed.clearedAt;
+      }
+    }
 
-    const transactionsParsed = JSON.parse(transactionsRaw) as unknown;
-    if (isPersistedTransactionsEnvelope(transactionsParsed)) {
-      return transactionsParsed.clearedAt;
+    const legacyTransactionsRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacyTransactionsRaw) {
+      const legacyTransactionsParsed = JSON.parse(legacyTransactionsRaw) as unknown;
+      if (isPersistedTransactionsEnvelope(legacyTransactionsParsed)) {
+        return legacyTransactionsParsed.clearedAt;
+      }
     }
 
     return 0;
