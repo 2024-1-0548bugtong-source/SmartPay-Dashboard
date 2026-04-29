@@ -205,7 +205,14 @@ export function applyRawEventToTransaction(
     const product = normalizeProductLabel(row.product);
     const price = parsePrice(product);
     if (price !== null) {
+      const previousFailedDraft = draft?.failureReason ? draft : null;
       nextDraft = upsertDraftFromPrompt(draft, product ?? row.product, price, eventTimestampMs);
+      if (previousFailedDraft) {
+        return {
+          draft: nextDraft,
+          completed: finalizeDraft(previousFailedDraft, row.timestamp, "FAILED", deriveFailedReason(previousFailedDraft)),
+        };
+      }
     }
     return { draft: nextDraft, completed: null };
   }
@@ -214,7 +221,14 @@ export function applyRawEventToTransaction(
     const product = normalizeProductLabel(row.product);
     const price = parsePrice(product);
     if (price !== null) {
+      const previousFailedDraft = draft?.failureReason ? draft : null;
       nextDraft = upsertDraftFromPrompt(draft, product ?? row.product, price, eventTimestampMs);
+      if (previousFailedDraft) {
+        return {
+          draft: nextDraft,
+          completed: finalizeDraft(previousFailedDraft, row.timestamp, "FAILED", deriveFailedReason(previousFailedDraft)),
+        };
+      }
     }
     return { draft: nextDraft, completed: null };
   }
@@ -267,21 +281,7 @@ export function applyRawEventToTransaction(
   }
 
   if (evLower === "invalid coin") {
-    const paymentStatus = row.paymentStatus?.toLowerCase();
     const failureReason = deriveFailedReason(nextDraft);
-    const normalizedRawLine = unwrapRawSerialLine(row.rawLine) ?? "";
-    const isTerminalInvalid =
-      paymentStatus === "no coin detected" ||
-      paymentStatus === "insufficient" ||
-      /payment invalid|payment incomplete|add more coins/i.test(normalizedRawLine);
-
-    if (isTerminalInvalid) {
-      return {
-        draft: null,
-        completed: finalizeDraft(nextDraft, row.timestamp, "FAILED", failureReason),
-      };
-    }
-
     return {
       draft: { ...nextDraft, failureReason, pendingCoinValue: null, lastActivityAtMs: eventTimestampMs },
       completed: null,
@@ -308,6 +308,13 @@ export function applyRawEventToTransaction(
   }
 
   if (evLower === "customer left" || evLower === "honestpay ready") {
+    if (nextDraft.failureReason) {
+      return {
+        draft: null,
+        completed: finalizeDraft(nextDraft, row.timestamp, "FAILED", deriveFailedReason(nextDraft)),
+      };
+    }
+
     if (eventTimestampMs - nextDraft.lastActivityAtMs < PAYMENT_GRACE_MS) {
       return { draft: nextDraft, completed: null };
     }

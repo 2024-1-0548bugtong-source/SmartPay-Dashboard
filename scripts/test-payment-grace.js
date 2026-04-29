@@ -18,6 +18,22 @@ function parse(rawLine) {
 function run() {
   const baseMs = Date.UTC(2026, 3, 29, 9, 15, 0);
 
+  const paymentInvalid = parse('PAYMENT INVALID');
+  assert.equal(paymentInvalid.event, 'Invalid Coin');
+  assert.equal(paymentInvalid.paymentStatus, null, 'generic failure markers must stay neutral');
+
+  const paymentIncomplete = parse('Payment Incomplete');
+  assert.equal(paymentIncomplete.event, 'Invalid Coin');
+  assert.equal(paymentIncomplete.paymentStatus, null, 'payment incomplete must not be pre-labeled insufficient');
+
+  const addMoreCoins = parse('Add More Coins');
+  assert.equal(addMoreCoins.event, 'Invalid Coin');
+  assert.equal(addMoreCoins.paymentStatus, null, 'add more coins must not be pre-labeled insufficient');
+
+  const placeholderInvalidCoin = parse('Coin Detected: ?g -> INVALID COIN');
+  assert.equal(placeholderInvalidCoin.event, 'Invalid Coin');
+  assert.equal(placeholderInvalidCoin.weight, null, 'placeholder invalid coin lines must still parse');
+
   resetBridgeStateForTests();
   assert.equal(
     consumeEventTransaction(parse('Product Removed. Pay Product One (PHP5).'), baseMs),
@@ -51,6 +67,44 @@ function run() {
   assert.ok(lateCustomerLeft, 'customer-left after the grace window should finalize the transaction');
   assert.equal(lateCustomerLeft.status, 'FAILED');
   assert.equal(lateCustomerLeft.inserted, 5);
+
+  resetBridgeStateForTests();
+  consumeEventTransaction(parse('Product Removed. Pay Product One (PHP5).'), baseMs);
+  consumeEventTransaction(parse('Coin Detected: ?g -> INVALID COIN'), baseMs + 1_000);
+  assert.equal(
+    consumeEventTransaction(parse('Payment Incomplete'), baseMs + 2_000),
+    null,
+    'payment incomplete should keep a failed draft open until trailing telemetry or session close',
+  );
+  consumeEventTransaction(
+    parse('Product Weight: 346.93 g | Coin Weight: 40.14 g | Product Type: 1 | Coin Value: 10 | Payment: NOT OK'),
+    baseMs + 3_000,
+  );
+
+  const invalidOverpay = consumeEventTransaction(parse('Customer Left'), baseMs + 4_000);
+  assert.ok(invalidOverpay, 'customer left should finalize a failed overpay attempt once telemetry has landed');
+  assert.equal(invalidOverpay.status, 'FAILED');
+  assert.equal(invalidOverpay.reason, 'INVALID');
+  assert.equal(invalidOverpay.inserted, 10);
+
+  resetBridgeStateForTests();
+  consumeEventTransaction(parse('Product Removed. Pay Product Two (PHP10).'), baseMs);
+  consumeEventTransaction(parse('Coin Detected: ?g -> INVALID COIN'), baseMs + 1_000);
+  assert.equal(
+    consumeEventTransaction(parse('Payment Incomplete'), baseMs + 2_000),
+    null,
+    'payment incomplete should also wait for trailing telemetry on underpay attempts',
+  );
+  consumeEventTransaction(
+    parse('Product Weight: 702.44 g | Coin Weight: 35.11 g | Product Type: 2 | Coin Value: 5 | Payment: NOT OK'),
+    baseMs + 3_000,
+  );
+
+  const invalidUnderpay = consumeEventTransaction(parse('Customer Left'), baseMs + 4_000);
+  assert.ok(invalidUnderpay, 'customer left should finalize a failed underpay attempt once telemetry has landed');
+  assert.equal(invalidUnderpay.status, 'FAILED');
+  assert.equal(invalidUnderpay.reason, 'INSUFFICIENT');
+  assert.equal(invalidUnderpay.inserted, 5);
 
   console.log('Payment grace tests PASSED');
 }

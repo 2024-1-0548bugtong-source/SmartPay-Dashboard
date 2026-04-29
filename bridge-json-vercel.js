@@ -164,6 +164,39 @@ function parseWeightValue(rawWeight) {
 }
 
 /**
+ * Recover the attempted coin denomination from bridge-visible weight lines.
+ * Supports both the current hardware calibration (35-38g / 40-50g) and the
+ * lighter example values used in the dashboard docs (7.3g / 8.8g).
+ * @param {number} weight
+ * @returns {number | null}
+ */
+function inferCoinValueFromWeight(weight) {
+  if (!Number.isFinite(weight) || weight <= 0) return null;
+
+  if ((weight >= 35 && weight <= 38) || (weight >= 6.9 && weight <= 7.8)) {
+    return 5;
+  }
+
+  if ((weight >= 40 && weight <= 50) || (weight >= 8.2 && weight <= 9.3)) {
+    return 10;
+  }
+
+  return null;
+}
+
+/**
+ * @param {string} rawLine
+ * @returns {number | null}
+ */
+function inferAttemptedCoinValueFromInvalidRaw(rawLine) {
+  const normalizedRaw = unwrapRawLine(rawLine);
+  const invalidCoinMatch = normalizedRaw.match(/^coin detected:\s*([\d.]+)g\s*->\s*invalid\s+coin$/i);
+  if (!invalidCoinMatch) return null;
+
+  return inferCoinValueFromWeight(Number.parseFloat(invalidCoinMatch[1]));
+}
+
+/**
  * @param {string} rawLine
  * @param {string | null} product
  * @returns {number | null}
@@ -266,6 +299,14 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
   if ((eventName.includes("product removed") || eventName.startsWith("pay ")) && parsed.product) {
     const product = formatTransactionProduct(parsed.product);
     const price = inferPriceFromProduct(parsed.product);
+    const previousFailedPayload = ongoingTransaction?.failureReason
+      ? buildTransactionPayload({
+          status: "FAILED",
+          reason: deriveFailedReason(ongoingTransaction),
+          rawLine: parsed.rawLine,
+          timestampMs: nowMs,
+        })
+      : null;
 
     if (product && price !== null) {
       ongoingTransaction = {
@@ -280,7 +321,7 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
         lastActivityAtMs: nowMs,
       };
     }
-    return null;
+    return previousFailedPayload;
   }
 
   if (!ongoingTransaction) return null;
@@ -314,27 +355,24 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
   }
 
   if (eventName === "invalid coin") {
-    const paymentStatus = normalizeEvent(parsed.paymentStatus);
     const normalizedRawLine = unwrapRawLine(parsed.rawLine);
-    ongoingTransaction.failureReason = deriveFailedReason(ongoingTransaction);
 
-    if (paymentStatus === "no coin detected" || paymentStatus === "insufficient" || /payment invalid|payment incomplete|add more coins/i.test(normalizedRawLine)) {
-      return buildTransactionPayload({
-        status: "FAILED",
-        reason: ongoingTransaction.failureReason,
-        rawLine: parsed.rawLine,
-        timestampMs: nowMs,
-      });
+    if (ongoingTransaction.attemptedCoinValue === null) {
+      const inferredAttemptedCoinValue = inferAttemptedCoinValueFromInvalidRaw(normalizedRawLine);
+      if (inferredAttemptedCoinValue !== null) {
+        ongoingTransaction.attemptedCoinValue = inferredAttemptedCoinValue;
+      }
     }
 
+    ongoingTransaction.failureReason = deriveFailedReason(ongoingTransaction);
+    ongoingTransaction.pendingCoinValue = null;
     ongoingTransaction.lastActivityAtMs = nowMs;
     return null;
   }
 
   if (eventName === "payment incomplete" || eventName === "add more coins") {
-    if (!ongoingTransaction.failureReason) {
-      ongoingTransaction.failureReason = deriveFailedReason(ongoingTransaction);
-    }
+    ongoingTransaction.failureReason = deriveFailedReason(ongoingTransaction);
+    ongoingTransaction.pendingCoinValue = null;
     ongoingTransaction.lastActivityAtMs = nowMs;
     return null;
   }
@@ -349,15 +387,25 @@ function consumeEventTransaction(parsed, nowMs = Date.now()) {
   }
 
   if (eventName === "customer left" || eventName === "honestpay ready") {
+    const fallbackReason = deriveFailedReason(ongoingTransaction);
+
+    if (ongoingTransaction.failureReason) {
+      return buildTransactionPayload({
+        status: "FAILED",
+        reason: fallbackReason,
+        rawLine: parsed.rawLine,
+        timestampMs: nowMs,
+      });
+    }
+
     const elapsedSinceLastActivity = nowMs - ongoingTransaction.lastActivityAtMs;
     if (elapsedSinceLastActivity < PAYMENT_GRACE_MS) {
       return null;
     }
 
-    const fallbackReason = deriveFailedReason(ongoingTransaction);
     return buildTransactionPayload({
       status: "FAILED",
-      reason: ongoingTransaction.failureReason || fallbackReason,
+      reason: fallbackReason,
       rawLine: parsed.rawLine,
       timestampMs: nowMs,
     });
@@ -595,6 +643,19 @@ function parseSmartPayLine(rawLine) {
     };
   }
 
+  const invalidCoinDetectedMatch = raw.match(/^coin detected:\s*([\d.]+|\?)g\s*->\s*invalid\s+coin$/i);
+  if (invalidCoinDetectedMatch) {
+    const weightToken = invalidCoinDetectedMatch[1];
+    return {
+      kind: "event",
+      event: "Invalid Coin",
+      product: null,
+      paymentStatus: null,
+      weight: weightToken === "?" ? null : `${Number(weightToken).toFixed(2)}g`,
+      rawLine: raw,
+    };
+  }
+
   const insertedMatch = raw.match(/^inserted:\s*php(\d+)$/i);
   if (insertedMatch) {
     return {
@@ -625,15 +686,15 @@ function parseSmartPayLine(rawLine) {
   }
 
   if (/^(?:waiting\s+payment\s*-\s*)?payment\s+invalid$/i.test(raw)) {
-    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   if (/^payment incomplete$/i.test(raw)) {
-    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   if (/^add more coins$/i.test(raw)) {
-    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: "Insufficient", weight: null, rawLine: raw };
+    return { kind: "event", event: "Invalid Coin", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
   if (/^customer left$/i.test(raw)) {
