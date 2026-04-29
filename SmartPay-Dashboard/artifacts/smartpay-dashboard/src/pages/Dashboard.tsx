@@ -4,7 +4,8 @@ import {
 } from "recharts";
 import {
   loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
-  exportCsv, computeStats, loadPirCounter, savePirCounter, incrementPirCounter, loadClearedAt, saveClearedAt, type TransactionRow,
+  exportCsv, computeStats, loadPirCounter, savePirCounter, incrementPirCounter,
+  loadClearedAt, saveClearedAt, clearTransactionsStorage, type TransactionRow,
 } from "@/lib/storage";
 import { PRODUCT_CATALOG, formatProductLabel, parseSerialLine, lcdPad, unwrapRawSerialLine, type LcdState } from "@/lib/serial";
 import {
@@ -367,8 +368,9 @@ function normalizeCompletedApiRows(
 // ── Main Dashboard ────────────────────────────────────────────────────────
 
 export default function Dashboard() {
+  const initialClearedAtRef = useRef(loadClearedAt());
   const [darkMode, setDarkMode] = useState(loadDarkMode);
-  const [transactions, setTransactions] = useState<TransactionRow[]>(() => loadTransactions());
+  const [transactions, setTransactions] = useState<TransactionRow[]>(() => loadTransactions(initialClearedAtRef.current));
   const initialPirCountRef = useRef(loadPirCounter().count);
   const [localPirCount, setLocalPirCount] = useState(initialPirCountRef.current);
   // The visible PIR counter is monotonic for the current day. Local Entry
@@ -388,7 +390,8 @@ export default function Dashboard() {
   const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const ongoingTransactionRef = useRef<TransactionDraft | null>(null);
   const transactionsApiModeRef = useRef<TransactionsApiMode>(defaultTransactionsApiMode());
-  const clearedAtRef = useRef(loadClearedAt());
+  const clearedAtRef = useRef(initialClearedAtRef.current);
+  const hasLocalTransactionChangesRef = useRef(false);
   const lastCounterPirTimestampRef = useRef(0);
   const localPirCountRef = useRef(initialPirCountRef.current);
   const lastLocalPirKeyRef = useRef<string | null>(null);
@@ -403,7 +406,7 @@ export default function Dashboard() {
   }, [darkMode]);
 
   // ── Persist transactions ──
-  useEffect(() => { saveTransactions(transactions); }, [transactions]);
+  useEffect(() => { saveTransactions(transactions, clearedAtRef.current); }, [transactions]);
 
   // ── Persist PIR counter floor ──
   useEffect(() => {
@@ -520,15 +523,22 @@ export default function Dashboard() {
       // Apply merged transactions. Do NOT derive the canonical entry counter
       // from these rows — the UI `entryCount` is controlled only by /api/counter.
       setTransactions((prev) => {
+        if (!hasLocalTransactionChangesRef.current) {
+          return fetchedTransactions;
+        }
+
         const filteredPrev = clearedAtRef.current === 0
           ? prev
           : prev.filter((row) => parseTimestampMs(row.timestamp) >= clearedAtRef.current);
 
-        if (fetchedTransactions.length >= filteredPrev.length) {
+        const mergedTransactions = mergeCompletedTransactions(filteredPrev, fetchedTransactions);
+
+        if (mergedTransactions.length === fetchedTransactions.length) {
+          hasLocalTransactionChangesRef.current = false;
           return fetchedTransactions;
         }
 
-        return mergeCompletedTransactions(filteredPrev, fetchedTransactions);
+        return mergedTransactions;
       });
     } catch (err) {
       console.debug("Failed to fetch transactions:", err);
@@ -619,6 +629,7 @@ export default function Dashboard() {
     ongoingTransactionRef.current = next.draft;
 
     if (next.completed) {
+      hasLocalTransactionChangesRef.current = true;
       setTransactions((prev) => mergeCompletedTransactions(prev, [next.completed!]));
 
       if (transactionsApiModeRef.current === "completed-transactions") {
@@ -807,11 +818,12 @@ export default function Dashboard() {
                   console.debug('Failed to clear remote store:', e);
                 }
                 // Clear local storage and PIR counter
-                localStorage.removeItem('smartpay_transactions');
                 localStorage.removeItem('smartpay_pir_counter');
                 ongoingTransactionRef.current = null;
                 clearedAtRef.current = Date.now();
                 saveClearedAt(clearedAtRef.current);
+                clearTransactionsStorage(clearedAtRef.current);
+                hasLocalTransactionChangesRef.current = false;
                 lastCounterPirTimestampRef.current = 0;
                 localPirCountRef.current = 0;
                 lastLocalPirKeyRef.current = null;

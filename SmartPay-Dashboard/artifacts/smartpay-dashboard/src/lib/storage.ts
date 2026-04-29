@@ -24,42 +24,90 @@ export interface PirCounter {
   date: string; // YYYY-MM-DD, reset daily
 }
 
+interface PersistedTransactionsEnvelope {
+  version: number;
+  clearedAt: number;
+  rows: TransactionRow[];
+}
+
 const STORAGE_KEY = "smartpay_transactions";
 const DARK_MODE_KEY = "smartpay_dark_mode";
 const PIR_KEY = "smartpay_pir_counter";
 const CLEARED_AT_KEY = "smartpay_cleared_at";
+const STORAGE_VERSION = 2;
+
+function parseTimestampMs(timestamp: string | null | undefined): number {
+  if (!timestamp) return 0;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeTransactionRows(rows: TransactionRow[], clearedAt = 0): TransactionRow[] {
+  return rows
+    .filter((row): row is TransactionRow => Boolean(row && typeof row.timestamp === "string"))
+    .map((row) => ({
+      ...row,
+      product: formatProductLabel(row.product) ?? row.product,
+    }))
+    .filter((row) => {
+      const timestampMs = parseTimestampMs(row.timestamp);
+      return clearedAt === 0 || timestampMs === 0 || timestampMs >= clearedAt;
+    })
+    .slice(0, 1000);
+}
+
+function isPersistedTransactionsEnvelope(value: unknown): value is PersistedTransactionsEnvelope {
+  if (!value || typeof value !== "object") return false;
+
+  const candidate = value as Partial<PersistedTransactionsEnvelope>;
+  return (
+    candidate.version === STORAGE_VERSION &&
+    typeof candidate.clearedAt === "number" &&
+    Array.isArray(candidate.rows)
+  );
+}
 
 // ── Transactions ──────────────────────────────────────────────────────────
 
-export function loadTransactions(): TransactionRow[] {
+export function loadTransactions(clearedAt = loadClearedAt()): TransactionRow[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
 
-    const parsed = JSON.parse(raw) as TransactionRow[];
-    return parsed.map((row) => ({
-      ...row,
-      product: formatProductLabel(row.product) ?? row.product,
-    }));
+    const parsed = JSON.parse(raw) as unknown;
+
+    if (isPersistedTransactionsEnvelope(parsed)) {
+      return normalizeTransactionRows(parsed.rows, Math.max(clearedAt, parsed.clearedAt));
+    }
+
+    // Explicit legacy migration path: pre-versioned builds stored a bare array.
+    // Accept it once, but always filter it against the current clear cutoff.
+    if (Array.isArray(parsed)) {
+      return normalizeTransactionRows(parsed as TransactionRow[], clearedAt);
+    }
+
+    return [];
   } catch {
     return [];
   }
 }
 
-export function saveTransactions(rows: TransactionRow[]): void {
+export function saveTransactions(rows: TransactionRow[], clearedAt = loadClearedAt()): void {
   try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(
-        rows.slice(0, 1000).map((row) => ({
-          ...row,
-          product: formatProductLabel(row.product) ?? row.product,
-        }))
-      )
-    );
+    const envelope: PersistedTransactionsEnvelope = {
+      version: STORAGE_VERSION,
+      clearedAt,
+      rows: normalizeTransactionRows(rows, clearedAt),
+    };
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
   } catch {
     // ignore storage quota errors
   }
+}
+
+export function clearTransactionsStorage(clearedAt: number): void {
+  saveTransactions([], clearedAt);
 }
 
 // ── Dark Mode ─────────────────────────────────────────────────────────────
@@ -107,7 +155,17 @@ export function loadClearedAt(): number {
   try {
     const raw = localStorage.getItem(CLEARED_AT_KEY);
     const parsed = raw ? Number.parseInt(raw, 10) : 0;
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+
+    const transactionsRaw = localStorage.getItem(STORAGE_KEY);
+    if (!transactionsRaw) return 0;
+
+    const transactionsParsed = JSON.parse(transactionsRaw) as unknown;
+    if (isPersistedTransactionsEnvelope(transactionsParsed)) {
+      return transactionsParsed.clearedAt;
+    }
+
+    return 0;
   } catch {
     return 0;
   }
