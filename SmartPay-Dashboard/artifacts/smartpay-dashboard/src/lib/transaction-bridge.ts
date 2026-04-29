@@ -59,6 +59,11 @@ function parseInsertedSignal(
     return { amount: parseInt(contractInsertMatch[1], 10), mode: "increment" };
   }
 
+  const telemetryCoinValueMatch = rawLine?.match(/coin\s+value:\s*(5|10)\b/i);
+  if (telemetryCoinValueMatch) {
+    return { amount: parseInt(telemetryCoinValueMatch[1], 10), mode: "increment" };
+  }
+
   const parsedPrice = parsePrice(product);
   return parsedPrice === null ? null : { amount: parsedPrice, mode: "increment" };
 }

@@ -40,6 +40,11 @@ const sensorRuntime = {
   showPaymentOkOnce: false,
 };
 
+const verboseTelemetryRuntime = {
+  lastCoinValue: 0,
+  lastProductType: 0,
+};
+
 function deriveRequiredCoins(productWeight: number): number {
   if (productWeight >= SENSOR_PRODUCT_TWO_MIN && productWeight <= SENSOR_PRODUCT_TWO_MAX) {
     return 10;
@@ -53,6 +58,12 @@ function deriveRequiredCoins(productWeight: number): number {
 function labelFromRequiredCoins(required: number): string | null {
   if (required === 5) return PRODUCT_CATALOG.PHP5.label;
   if (required === 10) return PRODUCT_CATALOG.PHP10.label;
+  return null;
+}
+
+function labelFromProductType(productType: number): string | null {
+  if (productType === 1) return PRODUCT_CATALOG.PHP5.label;
+  if (productType === 2) return PRODUCT_CATALOG.PHP10.label;
   return null;
 }
 
@@ -304,6 +315,48 @@ export function parseSerialLine(line: string): ParsedSerialLine | null {
       isLogEntry: false,
       isPirEntry: false,
       lcdState: { line1, line2: lcdPad(statusText), theme: "payment" },
+    };
+  }
+
+  const verboseTelemetryMatch = raw.match(
+    /^product\s+weight:\s*([+-]?\d+(?:\.\d+)?)\s*g\s*\|\s*coin\s+weight:\s*([+-]?\d+(?:\.\d+)?)\s*g\s*\|\s*product\s+type:\s*(\d+)\s*\|\s*coin\s+value:\s*(\d+)\s*\|\s*payment:\s*(ok|not\s+ok)$/i
+  );
+  if (verboseTelemetryMatch) {
+    const coinWeight = Math.abs(Number(verboseTelemetryMatch[2]));
+    const productType = Number(verboseTelemetryMatch[3]);
+    const coinValue = Number(verboseTelemetryMatch[4]);
+    const product = labelFromProductType(productType);
+
+    if (!Number.isFinite(coinValue) || coinValue <= 0 || !product) {
+      verboseTelemetryRuntime.lastCoinValue = 0;
+      verboseTelemetryRuntime.lastProductType = productType;
+      return null;
+    }
+
+    const isNewCoinEdge =
+      verboseTelemetryRuntime.lastCoinValue !== coinValue ||
+      verboseTelemetryRuntime.lastProductType !== productType;
+
+    verboseTelemetryRuntime.lastCoinValue = coinValue;
+    verboseTelemetryRuntime.lastProductType = productType;
+
+    if (!isNewCoinEdge) {
+      return null;
+    }
+
+    return {
+      event: "Inserted Balance",
+      product,
+      paymentStatus: "Pending",
+      weight: `${coinWeight.toFixed(2)}g`,
+      rawLine: raw,
+      isLogEntry: true,
+      isPirEntry: false,
+      lcdState: {
+        line1: lcdPad("Inserted Balance"),
+        line2: lcdPad(` PHP${coinValue}`),
+        theme: "payment",
+      },
     };
   }
 
