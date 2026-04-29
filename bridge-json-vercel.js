@@ -927,6 +927,7 @@ if (require.main === module) {
   start();
 } else {
   module.exports = {
+    start,
     PAYMENT_GRACE_MS,
     parseSmartPayLine,
     consumeEventTransaction,
