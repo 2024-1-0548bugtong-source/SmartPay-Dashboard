@@ -331,7 +331,7 @@ function parseTransactionLine(rawLine) {
     } else if (explicitInserted !== null) {
       insertedVal = explicitInserted;
     } else if (Number.isFinite(lastKnownInserted)) {
-      insertedVal = lastKnownInserted;
+      insertedVal = Number(lastKnownInserted);
       // consume it so it won't be reused for unrelated later lines
       lastKnownInserted = null;
     } else {
@@ -394,12 +394,11 @@ function parseSmartPayLine(rawLine) {
     return null;
   }
 
-  const entryMatch = raw.match(/^entry:\s*(\d+)/i);
-  if (entryMatch) {
+  if (/^entry(?:\s*:\s*\d+)?$/i.test(raw)) {
     return { kind: "event", event: "Entry", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
-  if (/^customer entered\b/i.test(raw)) {
+  if (/^customer(?:\s+|_)entered\b/i.test(raw)) {
     return { kind: "event", event: "Customer Entered", product: null, paymentStatus: null, weight: null, rawLine: raw };
   }
 
@@ -592,7 +591,7 @@ async function start() {
         console.log(`[AUTO] Serial ports detected: ${ports.map(p => p.path).join(', ')}`);
         portPath = ports[0].path;
       } catch (err) {
-        console.error("Serial error while listing ports:", err && err.message ? err.message : err);
+        console.error("Serial error while listing ports:", err instanceof Error ? err.message : err);
         process.exit(1);
       }
     }

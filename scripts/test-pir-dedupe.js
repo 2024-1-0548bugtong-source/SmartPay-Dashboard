@@ -1,3 +1,5 @@
+// @ts-nocheck
+
 const DEDUPE_WINDOW_MS = Number(process.env.DEDUPE_WINDOW_MS || 2500);
 
 let lastPirSentAt = 0;
@@ -12,18 +14,14 @@ function isPirEventName(eventName) {
 }
 
 function shouldDropPirDuplicate(nowMs) {
-  if (nowMs - lastPirSentAt < DEDUPE_WINDOW_MS) {
-    return true;
-  }
-  lastPirSentAt = nowMs;
-  return false;
+  return nowMs - lastPirSentAt < DEDUPE_WINDOW_MS;
 }
 
 function parseSmartPayLineForPir(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
-  if (/^entry:\s*\d+/i.test(s)) return 'Entry';
-  if (/^customer entered\b/i.test(s)) return 'Customer Entered';
+  if (/^entry(?:\s*:\s*\d+)?$/i.test(s)) return 'Entry';
+  if (/^customer(?:\s+|_)entered\b/i.test(s)) return 'Customer Entered';
   if (/\bentry\b/i.test(s)) return 'Entry';
   return null;
 }
@@ -43,6 +41,7 @@ function processLine(rawLine, nowMs) {
   }
 
   console.log(`[POST] event:Entry raw: ${rawLine} at +${nowMs}ms`);
+  lastPirSentAt = nowMs;
   return true;
 }
 

@@ -5,6 +5,53 @@ function getStore() {
   return globalThis.__honestpayTransactions;
 }
 
+function getHeader(req, name) {
+  const value = req?.headers?.[name];
+  if (Array.isArray(value)) return value[0] ?? null;
+  return typeof value === "string" ? value : null;
+}
+
+function getTransactionsUrl(req) {
+  const explicitUrl = typeof process.env.TRANSACTIONS_API_URL === "string"
+    ? process.env.TRANSACTIONS_API_URL.trim()
+    : "";
+  if (explicitUrl) return explicitUrl;
+
+  const host = getHeader(req, "x-forwarded-host") || getHeader(req, "host");
+  if (!host) return null;
+
+  const proto = getHeader(req, "x-forwarded-proto")
+    || (/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host) ? "http" : "https");
+
+  return `${proto}://${host}/api/transactions`;
+}
+
+async function getRowsForCounter(req) {
+  const transactionsUrl = getTransactionsUrl(req);
+
+  if (transactionsUrl && typeof fetch === "function") {
+    try {
+      const response = await fetch(transactionsUrl, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+
+      if (response.ok) {
+        const rows = await response.json();
+        if (Array.isArray(rows)) {
+          return rows;
+        }
+      } else {
+        console.warn(`[counter] fetch failed: ${response.status} ${transactionsUrl}`);
+      }
+    } catch (err) {
+      console.warn(`[counter] fetch fallback to local store: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return getStore();
+}
+
 function sendJson(res, status, payload) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -66,14 +113,14 @@ module.exports = async function handler(req, res) {
     return sendJson(res, 405, { ok: false, error: "method not allowed" });
   }
 
-  const store = getStore();
-  const customerEnteredCount = computePirCount(store);
+  const rows = await getRowsForCounter(req);
+  const customerEnteredCount = computePirCount(rows);
 
   return sendJson(res, 200, {
     ok: true,
     event: "customer_entered",
     count: customerEnteredCount,
-    totalRows: store.length,
+    totalRows: rows.length,
     updatedAt: new Date().toISOString(),
   });
 };
