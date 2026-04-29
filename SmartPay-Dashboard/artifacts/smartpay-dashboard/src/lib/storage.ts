@@ -27,6 +27,7 @@ export interface PirCounter {
 const STORAGE_KEY = "smartpay_transactions";
 const DARK_MODE_KEY = "smartpay_dark_mode";
 const PIR_KEY = "smartpay_pir_counter";
+const CLEARED_AT_KEY = "smartpay_cleared_at";
 
 // ── Transactions ──────────────────────────────────────────────────────────
 
@@ -99,6 +100,27 @@ export function loadPirCounter(): PirCounter {
 export function savePirCounter(counter: PirCounter): void {
   try {
     localStorage.setItem(PIR_KEY, JSON.stringify(counter));
+  } catch {}
+}
+
+export function loadClearedAt(): number {
+  try {
+    const raw = localStorage.getItem(CLEARED_AT_KEY);
+    const parsed = raw ? Number.parseInt(raw, 10) : 0;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function saveClearedAt(clearedAt: number): void {
+  try {
+    if (clearedAt > 0) {
+      localStorage.setItem(CLEARED_AT_KEY, String(clearedAt));
+      return;
+    }
+
+    localStorage.removeItem(CLEARED_AT_KEY);
   } catch {}
 }
 

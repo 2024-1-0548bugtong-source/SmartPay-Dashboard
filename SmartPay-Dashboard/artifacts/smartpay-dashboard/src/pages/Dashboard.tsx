@@ -4,7 +4,7 @@ import {
 } from "recharts";
 import {
   loadTransactions, saveTransactions, loadDarkMode, saveDarkMode,
-  exportCsv, computeStats, loadPirCounter, savePirCounter, incrementPirCounter, type TransactionRow,
+  exportCsv, computeStats, loadPirCounter, savePirCounter, incrementPirCounter, loadClearedAt, saveClearedAt, type TransactionRow,
 } from "@/lib/storage";
 import { PRODUCT_CATALOG, formatProductLabel, parseSerialLine, lcdPad, unwrapRawSerialLine, type LcdState } from "@/lib/serial";
 import {
@@ -388,7 +388,7 @@ export default function Dashboard() {
   const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const ongoingTransactionRef = useRef<TransactionDraft | null>(null);
   const transactionsApiModeRef = useRef<TransactionsApiMode>(defaultTransactionsApiMode());
-  const clearedAtRef = useRef(0);
+  const clearedAtRef = useRef(loadClearedAt());
   const lastCounterPirTimestampRef = useRef(0);
   const localPirCountRef = useRef(initialPirCountRef.current);
   const lastLocalPirKeyRef = useRef<string | null>(null);
@@ -811,6 +811,7 @@ export default function Dashboard() {
                 localStorage.removeItem('smartpay_pir_counter');
                 ongoingTransactionRef.current = null;
                 clearedAtRef.current = Date.now();
+                saveClearedAt(clearedAtRef.current);
                 lastCounterPirTimestampRef.current = 0;
                 localPirCountRef.current = 0;
                 lastLocalPirKeyRef.current = null;
