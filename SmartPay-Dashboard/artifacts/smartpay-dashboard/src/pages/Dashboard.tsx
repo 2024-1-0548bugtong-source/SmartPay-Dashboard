@@ -264,6 +264,19 @@ function parseApiWeight(weight: string | number | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function parseInsertedFromRawFrontend(rawLine: string | null | undefined): number | null {
+  if (typeof rawLine !== "string") return null;
+  const raw = rawLine.trim();
+  if (!raw) return null;
+  const m = raw.match(/inserted:\s*php(\d+)/i);
+  if (m) return Number.parseInt(m[1], 10);
+  const m2 = raw.match(/coin\s*:\s*(5|10)\s*pesos/i);
+  if (m2) return Number.parseInt(m2[1], 10);
+  const m3 = raw.match(/php\s*(\d+)\b/i);
+  if (m3) return Number.parseInt(m3[1], 10);
+  return null;
+}
+
 function normalizeCompletedApiRows(
   rows: Array<{
     id: number | string;
@@ -285,24 +298,45 @@ function normalizeCompletedApiRows(
         row.reason === "VALID" || row.reason === "INSUFFICIENT" || row.reason === "INVALID"
           ? row.reason
           : null;
-      const price = Number(row.price);
-      const inserted = Number(row.inserted ?? row.price);
+          const price = Number(row.price);
 
-      if (!product || !status || !reason || !Number.isFinite(price)) {
-        return null;
-      }
+          // Prefer explicit `row.inserted` when provided. However, some historical
+          // rows may have `inserted: 0` even though the `rawLine` contains the
+          // actual inserted amount (e.g. "Inserted: PHP5"). To avoid hiding
+          // valid non-zero values, parse the rawLine and prefer it when it
+          // indicates a positive amount while the recorded value is 0.
+          const explicitInserted = row.inserted !== undefined && row.inserted !== null ? Number(row.inserted) : NaN;
+          const parsedFromRaw = parseInsertedFromRawFrontend(row.rawLine ?? null);
 
-      return {
-        id: String(row.id),
-        timestamp: row.timestamp,
-        product,
-        price,
-        inserted: Number.isFinite(inserted) ? inserted : price,
-        weight: parseApiWeight(row.weight),
-        status,
-        reason,
-        rawLine: row.rawLine ?? null,
-      } satisfies TransactionRow;
+          let finalInserted: number | null = Number.isFinite(explicitInserted) ? explicitInserted : null;
+
+          if ((finalInserted === null || !Number.isFinite(finalInserted)) && Number.isFinite(parsedFromRaw)) {
+            finalInserted = parsedFromRaw;
+          }
+
+          // Recover cases where explicit value is 0 but rawLine has a positive
+          // inserted amount (fixup for older, inconsistent logs).
+          if (finalInserted === 0 && Number.isFinite(parsedFromRaw) && parsedFromRaw! > 0) {
+            finalInserted = parsedFromRaw;
+          }
+
+          if (!product || !status || !reason || !Number.isFinite(price)) {
+            return null;
+          }
+
+          const insertedValue = Number.isFinite(finalInserted as number) ? (finalInserted as number) : price;
+
+          return {
+            id: String(row.id),
+            timestamp: row.timestamp,
+            product,
+            price,
+            inserted: insertedValue,
+            weight: parseApiWeight(row.weight),
+            status,
+            reason,
+            rawLine: row.rawLine ?? null,
+          } satisfies TransactionRow;
     })
     .filter((row): row is TransactionRow => row !== null)
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -314,7 +348,10 @@ export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(loadDarkMode);
   const [transactions, setTransactions] = useState<TransactionRow[]>(() => loadTransactions());
   const [localPirCount, setLocalPirCount] = useState(0);
-  const [livePirCount, setLivePirCount] = useState<number | null>(null);
+  // `entryCount` is the canonical counter shown in the UI and MUST be
+  // updated only from the /api/counter GET poll. Do not derive it from
+  // transactions or local serial lines.
+  const [entryCount, setEntryCount] = useState(0);
   const [counterStatus, setCounterStatus] = useState("loading");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
   const [showManualEntry, setShowManualEntry] = useState(false);
@@ -342,8 +379,8 @@ export default function Dashboard() {
   // ── Persist transactions ──
   useEffect(() => { saveTransactions(transactions); }, [transactions]);
 
-  // ── PIR count — derived from today's "Entry" rows in the transaction log ──
-  const displayedPirCount = livePirCount ?? localPirCount;
+  // ── PIR count — only updated from the live counter API
+  const displayedPirCount = entryCount;
 
   // ── Live counter from deployed Vercel API ──
   useEffect(() => {
@@ -357,7 +394,8 @@ export default function Dashboard() {
         if (cancelled) return;
 
         if (data && typeof data.count === "number") {
-          setLivePirCount(data.count);
+          // Only update the canonical entry counter from the API.
+          setEntryCount(data.count);
           setCounterStatus("live");
         } else {
           setCounterStatus("no-data");
@@ -416,8 +454,9 @@ export default function Dashboard() {
         transactionsApiModeRef.current = "completed-transactions";
       }
 
+      // Apply merged transactions. Do NOT derive the canonical entry counter
+      // from these rows — the UI `entryCount` is controlled only by /api/counter.
       setTransactions(mergeCompletedTransactions(completedRows, buildCompletedTransactionsFromEvents(rawRows)));
-      setLocalPirCount(rawRows.length > 0 ? countPirEntries(rawRows) : 0);
     } catch (err) {
       console.debug("Failed to fetch transactions:", err);
     }
@@ -456,7 +495,7 @@ export default function Dashboard() {
 
     // PIR counter increment
     if (parsed.isPirEntry) {
-      setLocalPirCount((count) => count + 1);
+      // Visual flash only; do NOT update the canonical entry counter here.
       setRecentPirFlash(true);
       setTimeout(() => setRecentPirFlash(false), 1500);
     }
@@ -682,8 +721,8 @@ export default function Dashboard() {
                 localStorage.removeItem('smartpay_pir_counter');
                 ongoingTransactionRef.current = null;
                 setTransactions([]);
+                // Clear local-only PIR counter used for offline/debug display.
                 setLocalPirCount(0);
-                setLivePirCount(null);
                 console.log('[ACTION] Cleared local and remote transactions');
               }}
                 className="px-4 py-2 text-sm text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800 rounded-lg hover:bg-red-50 dark:hover:bg-red-950 transition-colors">

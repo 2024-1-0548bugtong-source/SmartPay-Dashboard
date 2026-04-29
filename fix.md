@@ -1,84 +1,64 @@
-using  Vercel for dashboard 
-with Arduino hardware connected via CMD/Serial bridge.
+ (React frontend + serverless API).
 
-PROBLEMS:
-1) Transaction logs show insertedAmount = 0 for FAILED transactions
-2) Customer entry (PIR count) is not showing or updating on the dashboard
+Backend status:
+- Backend is already fixed and tested locally
+- /api/transactions and /api/counter both return HTTP 200 in production
+- Arduino and serial bridge must NOT be changed
 
-==============================
-TRANSACTION BUSINESS RULES
-==============================
+PROBLEMS TO FIX (frontend + transaction classification consistency):
 
-These rules MUST be followed exactly:
+1) Customer entry (PIR count) does not update on the dashboard
+   even though GET /api/counter is being polled successfully.
 
-- SUCCESS + VALID
-  → insertedAmount === productPrice
+2) The dashboard still displays incorrect FAILED transaction rows
+   where insertedAmount appears as 0 when it should not.
 
-- FAILED + INSUFFICIENT
-  → insertedAmount < productPrice
+FAILING EXAMPLE THAT MUST BE HANDLED CORRECTLY:
 
-- FAILED + INVALID (overpayment)
-  → insertedAmount > productPrice
+Timestamp            Product  Price (PHP)  Inserted (PHP)  Status   Reason
+2026-04-29 15:21     P1       PHP 5        PHP 0           FAILED   INSUFFICIENT
+2026-04-29 15:20     P2       PHP 10       PHP 0           FAILED   INSUFFICIENT
+2026-04-29 15:20     P1       PHP 5        PHP 5           SUCCESS  VALID
+
+RULES (must be reflected accurately in UI and logic):
+
+- SUCCESS + VALID:
+  insertedAmount === productPrice
+
+- FAILED + INSUFFICIENT:
+  insertedAmount < productPrice
+  (including explicit insertedAmount = 0)
+
+- FAILED + INVALID:
+  insertedAmount > productPrice
 
 IMPORTANT:
-- insertedAmount must ALWAYS reflect the real inserted value
-- This applies to BOTH SUCCESS and FAILED transactions
-- insertedAmount must NEVER be reset before logging
-- Reset insertedAmount ONLY AFTER the transaction is saved
-- Do NOT change Arduino or PIR hardware code
+- insertedAmount = 0 is a VALID value, not “missing”
+- UI must not hide, replace, or normalize 0 to something else
+- Dashboard must display the exact insertedAmount returned by the API
+- FAILED transactions must still show the real insertedAmount
 
-Please look for:
-- premature reset of insertedAmount
-- logging only inside SUCCESS branches
-- failure branches that overwrite insertedAmount
-- defaults like `|| 0` or `?? 0` that mask real values
+PIR / ENTRY COUNTER RULES:
 
-==============================
-ARDUINO → BACKEND SYNC RULES
-==============================
+- entryCount must have independent state:
+  const [entryCount, setEntryCount] = useState(0)
 
-- Arduino sends accumulated values (coins, PIR entries)
-- Backend must log received values AS-IS
-- Backend must NOT assume 0 means failure
-- Backend must NOT recompute values already sent by Arduino
+- entryCount must be updated ONLY from GET /api/counter
+- entryCount must NOT:
+  - be derived from transactions
+  - reset when transactions update
+  - depend on transaction success
 
-Please inspect:
-- serial parsing logic
-- request body validation
-- fallback/default assignments
-- conditional logic that clears values on failure
+TASK FOR COPILOT:
 
-==============================
-PIR / CUSTOMER ENTRY ISSUE
-==============================
+- Audit the dashboard frontend code
+- Fix state management so transaction rows render correct insertedAmount
+- Ensure FAILED rows with insertedAmount = 0 render correctly
+- Fix entryCount so it updates reliably from /api/counter
+- Prevent any useEffect, reducer, or formatter from overwriting these values
+- Keep existing UI structure where possible
+- Do NOT modify backend or hardware-related files
 
-PROBLEM:
-Customer entry (PIR count) is detected by Arduino
-but is NOT visible or updating on the dashboard.
-
-EXPECTED FLOW:
-PIR Sensor → Arduino → Serial/CMD Bridge → API → Database → Dashboard
-
-Rules:
-- Do NOT modify PIR sensor code
-- Do NOT block PIR updates behind transactions
-- PIR count should be logged independently of purchases
-- Dashboard should fetch and render the latest stored PIR value
-
-Please check:
-- whether PIR data is sent in a separate API request
-- whether PIR updates are ignored when no transaction occurs
-- whether backend saves PIR data without overwriting it
-- whether frontend fetches PIR data on load or polling
-- whether state is cleared or not refreshed on the dashboard
-
-GOAL:
-Fix ONLY logic, sequencing, data handling, and state updates
-so that:
-- FAILED transactions log correct insertedAmount
-- INVALID vs INSUFFICIENT is classified correctly
-- Customer entry (PIR count) consistently appears on dashboard
-
-Do not refactor unrelated code.
-Do not change hardware behavior.
-``
+OUTPUT:
+Provide corrected React component code (state, useEffect, fetch logic, and rendering)
+that satisfies all the rules above.
