@@ -88,6 +88,32 @@ function buildTransactionId(row: Omit<TransactionRow, "id" | "rawLine">): string
   ].join(":");
 }
 
+function buildTransactionMergeKey(row: Omit<TransactionRow, "id">): string {
+  return [
+    timestampKey(row.timestamp),
+    normalizeProductLabel(row.product),
+    row.price,
+    row.status,
+    row.reason,
+  ].join(":");
+}
+
+function pickRicherTransactionRow(current: TransactionRow, candidate: TransactionRow): TransactionRow {
+  if (candidate.inserted !== current.inserted) {
+    return candidate.inserted > current.inserted ? candidate : current;
+  }
+
+  if (candidate.weight !== current.weight) {
+    return candidate.weight > current.weight ? candidate : current;
+  }
+
+  if ((candidate.rawLine ?? "").length !== (current.rawLine ?? "").length) {
+    return (candidate.rawLine ?? "").length > (current.rawLine ?? "").length ? candidate : current;
+  }
+
+  return candidate;
+}
+
 function finalizeDraft(
   draft: TransactionDraft,
   timestamp: string,
@@ -332,7 +358,10 @@ export function mergeCompletedTransactions(
   const merged = new Map<string, TransactionRow>();
 
   for (const row of [...existing, ...incoming]) {
-    merged.set(buildTransactionId(row), { ...row, id: buildTransactionId(row) });
+    const mergeKey = buildTransactionMergeKey(row);
+    const current = merged.get(mergeKey);
+    const next = current ? pickRicherTransactionRow(current, row) : row;
+    merged.set(mergeKey, { ...next, id: buildTransactionId(next) });
   }
 
   return Array.from(merged.values()).sort(
