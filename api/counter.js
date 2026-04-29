@@ -27,8 +27,18 @@ function isPirEvent(value) {
 function computePirCount(rows) {
   const PIR_DEDUPE_WINDOW_MS = 4000;
 
+  function rowLooksLikePir(row) {
+    if (isPirEvent(row?.event)) return true;
+    if (typeof row?.rawLine !== "string") return false;
+    const raw = row.rawLine.toLowerCase();
+    if (/^entry:\s*\d+/i.test(raw)) return true;
+    if (/\bcustomer entered\b/i.test(raw)) return true;
+    if (/\bentry\b/i.test(raw)) return true;
+    return false;
+  }
+
   const candidates = rows
-    .filter((row) => isPirEvent(row.event))
+    .filter((row) => rowLooksLikePir(row))
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
 
   let count = 0;

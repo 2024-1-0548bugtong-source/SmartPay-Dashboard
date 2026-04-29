@@ -6,6 +6,7 @@ const BAUD_RATE = Number(process.env.BAUD_RATE || 9600);
 const VERCEL_BASE_URL = (process.env.VERCEL_BASE_URL || process.argv[3] || "https://honest-pay-dashboard.vercel.app").replace(/\/$/, "");
 const API_URL = `${VERCEL_BASE_URL}/api/transactions`;
 const DEDUPE_WINDOW_MS = Number(process.env.DEDUPE_WINDOW_MS || 2500);
+const ALLOW_EVENT_POSTS = process.env.ALLOW_EVENT_POSTS === "true";
 
 /** @typedef {"P1" | "P2"} ProductCode */
 /** @typedef {"SUCCESS" | "FAILED"} TransactionStatus */
@@ -227,7 +228,10 @@ function consumeEventTransaction(parsed) {
 
   if (eventName === "invalid coin") {
     const paymentStatus = normalizeEvent(parsed.paymentStatus);
-    ongoingTransaction.failureReason = paymentStatus === "no coin detected" ? "INVALID" : "INSUFFICIENT";
+    ongoingTransaction.failureReason =
+      paymentStatus === "no coin detected" || /payment invalid|invalid coin/i.test(parsed.rawLine)
+        ? "INVALID"
+        : "INSUFFICIENT";
 
     if (paymentStatus === "no coin detected" || paymentStatus === "insufficient" || /payment invalid|payment incomplete|add more coins/i.test(parsed.rawLine)) {
       return buildTransactionPayload({
@@ -296,7 +300,7 @@ function parseTransactionLine(rawLine) {
       status: "FAILED",
       product: formatTransactionProduct(failedMatch[1]),
       price: inferPriceFromProduct(failedMatch[1]),
-      inserted: 0,
+      inserted: ongoingTransaction && Number.isFinite(ongoingTransaction.inserted) ? ongoingTransaction.inserted : 0,
       weight: null,
       reason: reason === "INVALID" || reason === "INSUFFICIENT" ? reason : "INVALID",
       rawLine: raw,
@@ -338,6 +342,12 @@ function parseSmartPayLine(rawLine) {
   }
 
   if (/^distance:\s*/i.test(raw) || /^product:\s*/i.test(raw)) {
+    return null;
+  }
+
+  // Ignore verbose telemetry lines from the Arduino that aren't events
+  // Examples: "Product Weight: 0.00 g | Coin Weight: 0.00 g | Product Type: 0 | Coin Value: 0"
+  if (/product\s+weight|coin\s+weight|product\s+type|coin\s+value|payment\s*:\s*not\b/i.test(raw)) {
     return null;
   }
 
@@ -487,7 +497,7 @@ function parseSmartPayLine(rawLine) {
   return null;
 }
 
-/** @param {TransactionPayload} payload */
+/** @param {any} payload */
 async function postToVercel(payload) {
   const res = await fetch(API_URL, {
     method: "POST",
@@ -608,20 +618,44 @@ function start() {
       return;
     }
 
-    const now = Date.now();
-    if (isPirEventName(eventName)) {
-      if (shouldDropPirDuplicate(now)) {
-        console.warn(`[SKIP] Duplicate PIR event within dedupe window: ${eventName}`);
-        return;
-      }
-    } else if (shouldDropDuplicate(now)) {
-      console.warn(`[SKIP] Duplicate event within dedupe window: ${eventName}`);
-      return;
-    }
-
     const payload = consumeEventTransaction(parsed);
 
     if (!payload) {
+      if (isPirEventName(eventName)) {
+        const now = Date.now();
+        if (shouldDropPirDuplicate(now)) {
+          console.warn(`[SKIP] Duplicate PIR event within dedupe window: ${eventName}`);
+          return;
+        }
+
+        // Post minimal PIR event rows so the remote API/counter can count entries.
+        const eventPayload = {
+          timestamp: new Date().toISOString(),
+          event: parsed.event,
+          product: parsed.product ?? null,
+          paymentStatus: parsed.paymentStatus ?? null,
+          weight: parsed.weight ?? null,
+          rawLine: parsed.rawLine ?? null,
+        };
+
+        if (!ALLOW_EVENT_POSTS) {
+          console.log(`[SKIP] Event posts disabled; not sending PIR event: ${eventName}`);
+        } else {
+          try {
+            await postToVercel(eventPayload);
+            console.log(`[SENT] event:${eventName}`);
+          } catch (err) {
+            console.error(`[POST ERROR] ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
+      return;
+    }
+
+    const now = Date.now();
+    if (shouldDropDuplicate(now)) {
+      console.warn(`[SKIP] Duplicate completed transaction within dedupe window: ${payload.status.toLowerCase()}`);
       return;
     }
 

@@ -153,7 +153,10 @@ export function applyRawEventToTransaction(
 
   if (evLower === "invalid coin") {
     const paymentStatus = row.paymentStatus?.toLowerCase();
-    const failureReason = paymentStatus === "no coin detected" ? "INVALID" : "INSUFFICIENT";
+    const failureReason =
+      paymentStatus === "no coin detected" || /payment invalid|invalid coin/i.test(row.rawLine ?? "")
+        ? "INVALID"
+        : "INSUFFICIENT";
     const isTerminalInvalid =
       paymentStatus === "no coin detected" ||
       paymentStatus === "insufficient" ||
