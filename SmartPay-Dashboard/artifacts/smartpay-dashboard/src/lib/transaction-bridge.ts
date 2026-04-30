@@ -358,7 +358,12 @@ export function mergeCompletedTransactions(
     const mergeKey = buildTransactionMergeKey(row);
     const current = merged.get(mergeKey);
     const next = current ? pickRicherTransactionRow(current, row) : row;
-    merged.set(mergeKey, { ...next, id: buildTransactionId(next) });
+    // Preserve any server-side numeric id mapping when merging so the
+    // frontend can map local rows back to server rows for PATCH/DELETE.
+    const serverId = (next as any).serverId ?? (current as any)?.serverId ?? null;
+    const mergedRow = { ...next, id: buildTransactionId(next) } as TransactionRow;
+    if (serverId !== null) (mergedRow as any).serverId = serverId;
+    merged.set(mergeKey, mergedRow);
   }
 
   return Array.from(merged.values()).sort(

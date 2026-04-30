@@ -359,9 +359,10 @@ function normalizeCompletedApiRows(
             status,
             reason,
             rawLine: row.rawLine ?? null,
-          } satisfies TransactionRow;
+            serverId: typeof row.id === "number" ? row.id : (Number.isFinite(Number(row.id)) ? Number(row.id) : null),
+          } as TransactionRow;
     })
-    .filter((row): row is TransactionRow => row !== null)
+    .filter(Boolean as unknown as (x: TransactionRow | null) => x is TransactionRow)
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 }
 
@@ -384,6 +385,21 @@ export default function Dashboard() {
   const [demoRunning, setDemoRunning] = useState(false);
   const [serialLcdState, setSerialLcdState] = useState<LcdState | null>(null);
   const [serialDebugLines, setSerialDebugLines] = useState<string[]>([]);
+
+  // ── Inline editing + local edit tracking ──
+  const [editingId, setEditingId] = useState<string | null>(null);
+  type EditDraft = { product: string; price: string; inserted: string; status: "SUCCESS" | "FAILED"; reason: "VALID" | "INSUFFICIENT" | "INVALID" };
+  const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Track server row ids currently being edited or deleted locally so
+  // polling won't re-introduce the old versions while we sync.
+  const editedServerIdsRef = useRef<Set<number>>(new Set());
+  const deletedServerIdsRef = useRef<Set<number>>(new Set());
+
+  // Add transaction panel state
+  const [showAddPanel, setShowAddPanel] = useState(false);
+  const [newDraft, setNewDraft] = useState<EditDraft | null>(null);
 
   const portRef = useRef<SerialPort | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -513,6 +529,15 @@ export default function Dashboard() {
 
       const completedRows = normalizeCompletedApiRows(filteredApiRows);
       const fetchedTransactions = mergeCompletedTransactions(completedRows, buildCompletedTransactionsFromEvents(rawRows));
+      // Remove any fetched rows that correspond to server IDs we're
+      // currently editing or have marked for deletion locally to avoid
+      // poll-based overwrites.
+      const filteredFetchedTransactions = fetchedTransactions.filter((row) => {
+        const sid = (row as any).serverId ?? null;
+        if (sid !== null && deletedServerIdsRef.current.has(sid)) return false;
+        if (sid !== null && editedServerIdsRef.current.has(sid)) return false;
+        return true;
+      });
 
       if (rawRows.length > 0) {
         transactionsApiModeRef.current = "raw-events";
@@ -523,7 +548,10 @@ export default function Dashboard() {
       // Apply merged transactions. Do NOT derive the canonical entry counter
       // from these rows — the UI `entryCount` is controlled only by /api/counter.
       setTransactions((prev) => {
-        if (!hasLocalTransactionChangesRef.current) {
+        // If there are no local edits in progress, it's safe to accept
+        // the server's full set. Otherwise merge while preserving local
+        // edits/deletions via the filtered list.
+        if (!hasLocalTransactionChangesRef.current && editedServerIdsRef.current.size === 0 && deletedServerIdsRef.current.size === 0) {
           return fetchedTransactions;
         }
 
@@ -531,10 +559,14 @@ export default function Dashboard() {
           ? prev
           : prev.filter((row) => parseTimestampMs(row.timestamp) >= clearedAtRef.current);
 
-        const mergedTransactions = mergeCompletedTransactions(filteredPrev, fetchedTransactions);
+        const mergedTransactions = mergeCompletedTransactions(filteredPrev, filteredFetchedTransactions);
 
+        // If the merged result equals the full fetched set, we can clear
+        // the local-changes guard and resume normal polling merges.
         if (mergedTransactions.length === fetchedTransactions.length) {
           hasLocalTransactionChangesRef.current = false;
+          editedServerIdsRef.current.clear();
+          deletedServerIdsRef.current.clear();
           return fetchedTransactions;
         }
 
@@ -725,6 +757,181 @@ export default function Dashboard() {
     setShowManualEntry(false);
   };
 
+  // ── Inline editing handlers ──────────────────────────────────────────────
+
+  const handleStartEdit = useCallback((row: TransactionRow) => {
+    if (editingId !== null) return; // only one row at a time
+    setEditingId(row.id);
+    setEditDraft({
+      product: row.product,
+      price: String(row.price),
+      inserted: String(row.inserted),
+      status: row.status,
+      reason: row.reason,
+    });
+    const sid = (row as any).serverId ?? null;
+    if (sid) editedServerIdsRef.current.add(sid);
+  }, [editingId]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingId(null);
+    setEditDraft(null);
+    setEditSaving(false);
+    // Clear any server edit guard since only one row can be edited at a time
+    editedServerIdsRef.current.clear();
+  }, []);
+
+  const handleSaveEdit = useCallback(async () => {
+    if (!editingId || !editDraft) return;
+
+    const priceNum = Number(editDraft.price);
+    const insertedNum = Number(editDraft.inserted);
+    if (!Number.isFinite(priceNum) || priceNum <= 0) {
+      alert("Price must be a positive number.");
+      return;
+    }
+    if (!Number.isFinite(insertedNum) || insertedNum < 0) {
+      alert("Inserted must be a non-negative number.");
+      return;
+    }
+    if (!window.confirm("Save changes to this transaction?")) return;
+
+    setEditSaving(true);
+
+    const updatedFields = {
+      product: editDraft.product,
+      price: priceNum,
+      inserted: insertedNum,
+      status: editDraft.status,
+      reason: editDraft.reason,
+    };
+
+    // Update local state immediately (optimistic)
+    setTransactions((prev) => {
+      const next = prev.map((row) => {
+        if (row.id !== editingId) return row;
+        return { ...row, ...updatedFields };
+      });
+      return next;
+    });
+    hasLocalTransactionChangesRef.current = true;
+
+    // Try to persist to Vercel API using the row's serverId
+    const targetRow = transactions.find((r) => r.id === editingId);
+    if ((targetRow as any)?.serverId) {
+      try {
+        const apiBase = (window as unknown as { __SMARTPAY_API_BASE?: string }).__SMARTPAY_API_BASE ?? "";
+        await fetch(`${apiBase}/api/transactions/${(targetRow as any).serverId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updatedFields),
+        });
+      } catch {
+        // Non-fatal: local edit already applied
+      }
+      finally {
+        // Clear guard for this server id so polling can resume
+        const sid = (targetRow as any).serverId; if (sid) editedServerIdsRef.current.delete(sid);
+      }
+    }
+
+    setEditingId(null);
+    setEditDraft(null);
+    setEditSaving(false);
+  }, [editingId, editDraft, transactions]);
+
+  // ── Delete a single transaction (local-first, then remote) ──
+  const handleDeleteRow = useCallback(async (row: TransactionRow) => {
+    if (!window.confirm("Delete this transaction? This cannot be undone.")) return;
+
+    // Optimistic local removal
+    setTransactions((prev) => prev.filter((r) => r.id !== row.id));
+    hasLocalTransactionChangesRef.current = true;
+
+    const sid = (row as any).serverId ?? null;
+    if (!sid) return;
+
+    // Mark as deleted so polling won't reintroduce it while we await remote delete
+    deletedServerIdsRef.current.add(sid);
+    try {
+      const apiBase = (window as unknown as { __SMARTPAY_API_BASE?: string }).__SMARTPAY_API_BASE ?? "";
+      await fetch(`${apiBase}/api/transactions/${sid}`, { method: "DELETE" });
+    } catch (err) {
+      console.debug("Failed to delete remote transaction:", err);
+    } finally {
+      // Allow polling to resume once we've attempted deletion
+      deletedServerIdsRef.current.delete(sid);
+    }
+  }, []);
+
+  // ── Add transaction UI handlers ──
+  const handleStartAdd = useCallback(() => {
+    setNewDraft({ product: "Product One (PHP5)", price: "5", inserted: "5", status: "SUCCESS", reason: "VALID" });
+    setShowAddPanel(true);
+  }, []);
+
+  const handleCancelAdd = useCallback(() => {
+    setShowAddPanel(false);
+    setNewDraft(null);
+  }, []);
+
+  const handleSaveNew = useCallback(async () => {
+    if (!newDraft) return;
+    const priceNum = Number(newDraft.price);
+    const insertedNum = Number(newDraft.inserted);
+    if (!Number.isFinite(priceNum) || priceNum <= 0) { alert("Price must be positive"); return; }
+    if (!Number.isFinite(insertedNum) || insertedNum < 0) { alert("Inserted must be non-negative"); return; }
+    if (!window.confirm("Create this transaction?")) return;
+
+    const payload = {
+      timestamp: new Date().toISOString(),
+      product: newDraft.product,
+      price: priceNum,
+      inserted: insertedNum,
+      weight: null,
+      status: newDraft.status,
+      reason: newDraft.reason,
+      rawLine: null,
+    };
+
+    // Optimistic local add
+    const localRow = {
+      id: `local-${Date.now()}`,
+      timestamp: payload.timestamp,
+      product: payload.product,
+      price: payload.price,
+      inserted: payload.inserted,
+      weight: 0,
+      status: payload.status,
+      reason: payload.reason,
+      rawLine: null,
+      serverId: null,
+    } as unknown as TransactionRow;
+
+    setTransactions((prev) => [localRow, ...prev]);
+    hasLocalTransactionChangesRef.current = true;
+
+    try {
+      const res = await fetch(`/api/transactions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data?.row) {
+        const normalized = normalizeCompletedApiRows([data.row]);
+        if (normalized && normalized.length > 0) {
+          setTransactions((prev) => mergeCompletedTransactions(prev, normalized));
+        }
+      }
+    } catch (err) {
+      console.debug("Failed to create remote transaction:", err);
+    }
+
+    setShowAddPanel(false);
+    setNewDraft(null);
+  }, [newDraft]);
+
   const stats = computeStats(transactions);
 
   const connBadge = connStatus === "connected"
@@ -794,6 +1001,10 @@ export default function Dashboard() {
             <button onClick={() => setShowManualEntry((v) => !v)}
               className="px-4 py-2 bg-secondary text-secondary-foreground font-semibold rounded-lg border border-border hover:bg-muted transition-colors text-sm">
               ✏️ Manual Entry
+            </button>
+            <button onClick={handleStartAdd}
+              className="px-4 py-2 bg-emerald-600 text-white font-semibold rounded-lg border border-emerald-700 hover:bg-emerald-700 transition-colors text-sm">
+              ➕ Add Transaction
             </button>
             {!demoRunning
               ? <button onClick={runDemo}
@@ -871,6 +1082,39 @@ export default function Dashboard() {
                     {s}
                   </button>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Add Transaction Panel */}
+          {showAddPanel && newDraft && (
+            <div className="bg-card border border-card-border rounded-xl p-4 shadow-sm">
+              <h3 className="font-semibold mb-2 text-xs text-muted-foreground uppercase tracking-wider">Add Transaction</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                <select className="col-span-1 border border-input rounded px-2 py-2 text-sm" value={newDraft.product}
+                  onChange={(e) => setNewDraft((d) => d ? { ...d, product: e.target.value } : d)}>
+                  <option value="Product One (PHP5)">Product One (PHP5)</option>
+                  <option value="Product Two (PHP10)">Product Two (PHP10)</option>
+                </select>
+                <input type="number" min="1" step="1" className="col-span-1 px-2 py-2 border rounded" value={newDraft.price}
+                  onChange={(e) => setNewDraft((d) => d ? { ...d, price: e.target.value } : d)} />
+                <input type="number" min="0" step="1" className="col-span-1 px-2 py-2 border rounded" value={newDraft.inserted}
+                  onChange={(e) => setNewDraft((d) => d ? { ...d, inserted: e.target.value } : d)} />
+                <select className="col-span-1 border rounded px-2 py-2" value={newDraft.status}
+                  onChange={(e) => setNewDraft((d) => d ? { ...d, status: e.target.value as any } : d)}>
+                  <option value="SUCCESS">SUCCESS</option>
+                  <option value="FAILED">FAILED</option>
+                </select>
+                <select className="col-span-1 border rounded px-2 py-2" value={newDraft.reason}
+                  onChange={(e) => setNewDraft((d) => d ? { ...d, reason: e.target.value as any } : d)}>
+                  <option value="VALID">VALID</option>
+                  <option value="INSUFFICIENT">INSUFFICIENT</option>
+                  <option value="INVALID">INVALID</option>
+                </select>
+                <div className="col-span-3 flex gap-2">
+                  <button onClick={handleSaveNew} className="px-4 py-2 bg-primary text-white rounded">Create</button>
+                  <button onClick={handleCancelAdd} className="px-4 py-2 bg-muted rounded">Cancel</button>
+                </div>
               </div>
             </div>
           )}
@@ -987,50 +1231,164 @@ export default function Dashboard() {
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10">
                   <tr className="bg-muted/80 backdrop-blur">
-                    {["Timestamp", "Product", "Price (PHP)", "Inserted (PHP)", "Status", "Reason"].map((h) => (
-                      <th key={h} className="text-left px-4 py-2 font-semibold text-muted-foreground text-xs whitespace-nowrap">{h}</th>
+                    {["Timestamp", "Product", "Price (PHP)", "Inserted (PHP)", "Status", "Reason", ""].map((h, i) => (
+                      <th key={i} className="text-left px-4 py-2 font-semibold text-muted-foreground text-xs whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
                   {transactions.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="text-center py-12 text-muted-foreground">
+                      <td colSpan={7} className="text-center py-12 text-muted-foreground">
                         <div className="text-3xl mb-2">📡</div>
                         <div>No completed transactions yet.</div>
                         <div className="text-xs mt-1">Connect Arduino, run the demo, or use Manual Entry.</div>
                       </td>
                     </tr>
-                  ) : transactions.map((row) => (
-                    <tr key={row.id} className={`hover:bg-muted/30 transition-colors ${row.status === "SUCCESS" ? "bg-green-50/5 dark:bg-green-950/10" : "bg-red-50/5 dark:bg-red-950/10"}`}>
-                      <td className="px-4 py-2 text-muted-foreground font-mono text-xs whitespace-nowrap">{formatTimestamp(row.timestamp)}</td>
-                      <td className="px-4 py-2">
-                        <span className="font-semibold text-yellow-700 dark:text-yellow-400 text-xs">{row.product}</span>
-                      </td>
-                      <td className="px-4 py-2 font-mono font-semibold">PHP {row.price}</td>
-                      <td className="px-4 py-2 font-mono font-semibold">PHP {row.inserted}</td>
-                      <td className="px-4 py-2">
-                        <span className={`px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${
-                          row.status === "SUCCESS"
-                            ? "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200"
-                            : "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200"
-                        }`}>
-                          {row.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                          row.reason === "VALID"
-                            ? "bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300"
-                            : row.reason === "INSUFFICIENT"
-                            ? "bg-yellow-50 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300"
-                            : "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300"
-                        }`}>
-                          {row.reason}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  ) : transactions.map((row) => {
+                    const isEditing = editingId === row.id;
+                    return (
+                      <tr key={row.id} className={`transition-colors ${isEditing ? "bg-blue-50/20 dark:bg-blue-950/20" : row.status === "SUCCESS" ? "bg-green-50/5 dark:bg-green-950/10 hover:bg-muted/30" : "bg-red-50/5 dark:bg-red-950/10 hover:bg-muted/30"}`}>
+                        {/* Timestamp — never editable */}
+                        <td className="px-4 py-2 text-muted-foreground font-mono text-xs whitespace-nowrap">{formatTimestamp(row.timestamp)}</td>
+
+                        {/* Product */}
+                        <td className="px-4 py-2">
+                          {isEditing && editDraft ? (
+                            <select
+                              className="border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                              value={editDraft.product}
+                              onChange={(e) => setEditDraft((d) => d ? { ...d, product: e.target.value } : d)}
+                            >
+                              <option value="Product One (PHP5)">Product One (PHP5)</option>
+                              <option value="Product Two (PHP10)">Product Two (PHP10)</option>
+                            </select>
+                          ) : (
+                            <span className="font-semibold text-yellow-700 dark:text-yellow-400 text-xs">{row.product}</span>
+                          )}
+                        </td>
+
+                        {/* Price */}
+                        <td className="px-4 py-2 font-mono font-semibold">
+                          {isEditing && editDraft ? (
+                            <input
+                              type="number"
+                              min="1"
+                              step="1"
+                              className="border border-border rounded px-2 py-1 text-xs font-mono bg-background text-foreground w-20 focus:outline-none focus:ring-1 focus:ring-primary"
+                              value={editDraft.price}
+                              onChange={(e) => setEditDraft((d) => d ? { ...d, price: e.target.value } : d)}
+                            />
+                          ) : (
+                            <>PHP {row.price}</>
+                          )}
+                        </td>
+
+                        {/* Inserted */}
+                        <td className="px-4 py-2 font-mono font-semibold">
+                          {isEditing && editDraft ? (
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              className="border border-border rounded px-2 py-1 text-xs font-mono bg-background text-foreground w-20 focus:outline-none focus:ring-1 focus:ring-primary"
+                              value={editDraft.inserted}
+                              onChange={(e) => setEditDraft((d) => d ? { ...d, inserted: e.target.value } : d)}
+                            />
+                          ) : (
+                            <>PHP {row.inserted}</>
+                          )}
+                        </td>
+
+                        {/* Status */}
+                        <td className="px-4 py-2">
+                          {isEditing && editDraft ? (
+                            <select
+                              className="border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                              value={editDraft.status}
+                              onChange={(e) => setEditDraft((d) => d ? { ...d, status: e.target.value as "SUCCESS" | "FAILED" } : d)}
+                            >
+                              <option value="SUCCESS">SUCCESS</option>
+                              <option value="FAILED">FAILED</option>
+                            </select>
+                          ) : (
+                            <span className={`px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${
+                              row.status === "SUCCESS"
+                                ? "bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200"
+                                : "bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-200"
+                            }`}>
+                              {row.status}
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Reason */}
+                        <td className="px-4 py-2">
+                          {isEditing && editDraft ? (
+                            <select
+                              className="border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                              value={editDraft.reason}
+                              onChange={(e) => setEditDraft((d) => d ? { ...d, reason: e.target.value as "VALID" | "INSUFFICIENT" | "INVALID" } : d)}
+                            >
+                              <option value="VALID">VALID</option>
+                              <option value="INSUFFICIENT">INSUFFICIENT</option>
+                              <option value="INVALID">INVALID</option>
+                            </select>
+                          ) : (
+                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                              row.reason === "VALID"
+                                ? "bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300"
+                                : row.reason === "INSUFFICIENT"
+                                ? "bg-yellow-50 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300"
+                                : "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                            }`}>
+                              {row.reason}
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Actions */}
+                        <td className="px-4 py-2 whitespace-nowrap">
+                          {isEditing ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={handleSaveEdit}
+                                disabled={editSaving}
+                                className="px-2 py-1 rounded text-xs font-semibold bg-green-600 hover:bg-green-700 text-white disabled:opacity-50 transition-colors"
+                              >
+                                {editSaving ? "Saving…" : "Save"}
+                              </button>
+                              <button
+                                onClick={handleCancelEdit}
+                                disabled={editSaving}
+                                className="px-2 py-1 rounded text-xs font-semibold bg-muted hover:bg-muted/70 text-foreground disabled:opacity-50 transition-colors"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => handleStartEdit(row)}
+                                disabled={editingId !== null}
+                                className="px-2 py-1 rounded text-xs font-semibold border border-border hover:bg-muted/50 text-muted-foreground disabled:opacity-40 transition-colors"
+                                title="Edit this transaction"
+                              >
+                                ✏️ Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteRow(row)}
+                                className="px-2 py-1 rounded text-xs font-semibold border border-red-200 hover:bg-red-50 text-red-600 transition-colors"
+                                title="Delete this transaction"
+                              >
+                                🗑 Delete
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

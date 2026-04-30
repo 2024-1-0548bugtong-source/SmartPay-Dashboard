@@ -41,6 +41,8 @@
 
 9. **Capacitor**
    - For power smoothing if needed
+   10. Transistors
+   11. 
    
 ## Setup Instructions
 
